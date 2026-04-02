@@ -1,4 +1,4 @@
-## Term Project
+## Term Project - Rishab Pangal, Lucas Lu, Mrinaal Ramachandran
 
 ### Set up environment
 using the conda or pyenv
