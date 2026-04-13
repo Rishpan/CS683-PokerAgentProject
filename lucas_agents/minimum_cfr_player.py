@@ -5,7 +5,7 @@ from copy import deepcopy
 
 from pypokerengine.players import BasePokerPlayer
 
-from experiment.regret_minimization_research.abstraction import (
+from lucas_agents.abstraction import (
     compress_action_history,
     make_info_set_key,
 )
