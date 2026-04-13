@@ -12,7 +12,7 @@
 - Postflop simulation count is moderate, which limits accuracy in marginal spots.
 
 ## Experimental stronger agent idea
-`lucas_agents/research_superior_agent.py`
+`lucas_agents/discounted_mccfr_plus_agent.py`
 - inherits from `AdvancedCFRPlayer`
 - increases postflop simulation count
 - lowers exploration to sharpen policy faster
@@ -22,10 +22,10 @@
 
 ## Evaluation plan
 1. Re-train baseline advanced CFR cleanly.
-2. Train research superior agent.
+2. Train discounted MCCFR+ agent.
 3. Run repeated comparisons:
-   - superior vs advanced CFR
-   - superior vs condition threshold
+   - discounted MCCFR+ vs advanced CFR
+   - discounted MCCFR+ vs condition threshold
    - advanced CFR vs condition threshold
 4. Compare win count and average final stack over larger batches.
 

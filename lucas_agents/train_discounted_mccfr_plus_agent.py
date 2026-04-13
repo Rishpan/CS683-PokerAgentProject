@@ -11,14 +11,14 @@ from pypokerengine.api.game import setup_config, start_poker
 
 from lucas_agents.advanced_cfr.advanced_cfr_player import AdvancedCFRPlayer
 from lucas_agents.condition_threshold_player import ConditionThresholdPlayer
-from lucas_agents.research_superior_agent import ResearchSuperiorAgent
+from lucas_agents.discounted_mccfr_plus_agent import DiscountedMCCFRPlusAgent
 
 
-DEFAULT_POLICY_PATH = os.path.join(PROJECT_ROOT, "lucas_agents", "research_superior_policy.json")
+DEFAULT_POLICY_PATH = os.path.join(PROJECT_ROOT, "lucas_agents", "discounted_mccfr_plus_policy.json")
 
 
 def parse_args():
-  parser = argparse.ArgumentParser(description="Train the research superior agent by fixed game count.")
+  parser = argparse.ArgumentParser(description="Train the discounted MCCFR+ agent by fixed game count.")
   parser.add_argument("--games", type=int, default=400)
   parser.add_argument("--stack", type=int, default=500)
   parser.add_argument("--small-blind", type=int, default=10)
@@ -38,7 +38,7 @@ def build_opponent(game_index):
 
 def main():
   args = parse_args()
-  learner = ResearchSuperiorAgent(policy_path=args.policy_path, training_enabled=True)
+  learner = DiscountedMCCFRPlusAgent(policy_path=args.policy_path, training_enabled=True)
   total_rounds = 0
 
   for game_index in range(1, args.games + 1):
@@ -48,7 +48,7 @@ def main():
         initial_stack=args.stack,
         small_blind_amount=args.small_blind,
     )
-    config.register_player(name="research_superior", algorithm=learner)
+    config.register_player(name="discounted_mccfr_plus", algorithm=learner)
     config.register_player(name="opponent", algorithm=opponent)
     result = start_poker(config, verbose=args.verbose)
     if learner.round_count <= 0:
@@ -56,7 +56,7 @@ def main():
     total_rounds += learner.round_count
     print(
         f"game={game_index}/{args.games} rounds_played={learner.round_count} total_rounds={total_rounds} "
-        f"stack={next(player['stack'] for player in result['players'] if player['name'] == 'research_superior')}"
+        f"stack={next(player['stack'] for player in result['players'] if player['name'] == 'discounted_mccfr_plus')}"
     )
 
   learner.save_policy()

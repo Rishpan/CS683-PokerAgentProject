@@ -3,9 +3,9 @@ import random
 from lucas_agents.advanced_cfr.advanced_cfr_player import AdvancedCFRPlayer
 
 
-class ResearchSuperiorAgent(AdvancedCFRPlayer):
+class DiscountedMCCFRPlusAgent(AdvancedCFRPlayer):
   """
-  Experimental stronger variant built on top of AdvancedCFRPlayer.
+  Experimental discounted MCCFR-style variant built on top of AdvancedCFRPlayer.
 
   Main ideas:
   - richer postflop rollouts for better equity estimates
@@ -148,4 +148,4 @@ class ResearchSuperiorAgent(AdvancedCFRPlayer):
 
 
 def setup_ai():
-  return ResearchSuperiorAgent(training_enabled=False, exploration=0.0)
+  return DiscountedMCCFRPlusAgent(training_enabled=False, exploration=0.0)
