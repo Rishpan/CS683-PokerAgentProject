@@ -1,1 +1,8 @@
 __pycache__/
+.codex
+*.txt
+!requirements.txt
+!pytest.txt
+!lucas_agents/**/README.md
+!lucas_agents/**/comparison_notes.md
+!lucas_agents/**/summary.md

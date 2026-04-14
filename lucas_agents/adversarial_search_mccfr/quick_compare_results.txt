@@ -1,8 +1,0 @@
-Progress: [##----------------------------] 1/12Progress: [#####-------------------------] 2/12Progress: [#######-----------------------] 3/12Progress: [##########--------------------] 4/12Progress: [############------------------] 5/12Progress: [###############---------------] 6/12Progress: [#################-------------] 7/12Progress: [####################----------] 8/12Progress: [######################--------] 9/12Progress: [#########################-----] 10/12Progress: [###########################---] 11/12Progress: [##############################] 12/12
-Head-to-head comparison
-Games: 12 | Max rounds/game: 40 | Starting stack: $500 | Small blind: $10
-
-Player                                  Wins     Ties Avg Final Stack
-----------------------------------------------------------------------
-Player B (learnable_discounted_mccfr_agent.py)        9        0         722.50
-Player A (adversarial_search_mccfr_agent.py)        3        0         275.83
