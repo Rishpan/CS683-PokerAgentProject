@@ -43,7 +43,12 @@ def main():
       [
           sys.executable,
           "compare_agents.py",
-          os.path.join(PROJECT_ROOT, "lucas_agents", "discounted_mccfr_plus_agent.py"),
+          os.path.join(
+              PROJECT_ROOT,
+              "lucas_agents",
+              "discounted_mccfr_plus",
+              "discounted_mccfr_plus_agent.py",
+          ),
           os.path.join(PROJECT_ROOT, "lucas_agents", "advanced_cfr", "advanced_cfr_player.py"),
           "--games",
           "100",
@@ -61,7 +66,12 @@ def main():
       [
           sys.executable,
           "compare_agents.py",
-          os.path.join(PROJECT_ROOT, "lucas_agents", "discounted_mccfr_plus_agent.py"),
+          os.path.join(
+              PROJECT_ROOT,
+              "lucas_agents",
+              "discounted_mccfr_plus",
+              "discounted_mccfr_plus_agent.py",
+          ),
           os.path.join(PROJECT_ROOT, "lucas_agents", "condition_threshold_player.py"),
           "--games",
           "100",

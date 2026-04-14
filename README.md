@@ -22,6 +22,12 @@ import pypokerengine
 print("hello world")
 ```
 
+### Lucas agent packages
+
+- `lucas_agents/advanced_cfr/`: baseline learned CFR-style agent family
+- `lucas_agents/discounted_mccfr_plus/`: discounted MCCFR+ package and trainer
+- `lucas_agents/learnable_discounted_mccfr/`: learnable discounted MCCFR package with online coefficient updates
+
 
 
 ### Create your own player

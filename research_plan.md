@@ -12,13 +12,20 @@
 - Postflop simulation count is moderate, which limits accuracy in marginal spots.
 
 ## Experimental stronger agent idea
-`lucas_agents/discounted_mccfr_plus_agent.py`
+`lucas_agents/discounted_mccfr_plus/discounted_mccfr_plus_agent.py`
 - inherits from `AdvancedCFRPlayer`
 - increases postflop simulation count
 - lowers exploration to sharpen policy faster
 - increases prior weight but retunes priors toward stronger value betting and pressure-aware folding
 - preserves regret signal longer via slower discounting
 - trusts learned raise actions more aggressively at inference time
+
+## Learnable discounted MCCFR variant
+`lucas_agents/learnable_discounted_mccfr/learnable_discounted_mccfr_agent.py`
+- starts from the discounted MCCFR+ coefficients instead of random weights
+- stores trainable fold/call/raise coefficient maps in policy JSON
+- updates those coefficients online after each round using a mixed reward-plus-heuristic target
+- keeps the same `setup_ai()` entrypoint shape so it works with `compare_agents.py`
 
 ## Evaluation plan
 1. Re-train baseline advanced CFR cleanly.
