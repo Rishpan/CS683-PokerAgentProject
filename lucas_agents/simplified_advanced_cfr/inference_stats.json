@@ -1,0 +1,23 @@
+{
+  "base_action_used": 3969,
+  "by_street": {
+    "flop": {
+      "base": 1512,
+      "learned": 93
+    },
+    "preflop": {
+      "base": 821,
+      "learned": 1433
+    },
+    "river": {
+      "base": 624,
+      "learned": 51
+    },
+    "turn": {
+      "base": 1012,
+      "learned": 61
+    }
+  },
+  "learned_action_used": 1638,
+  "total_decisions": 5607
+}

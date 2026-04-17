@@ -9,6 +9,7 @@ from argparse import ArgumentParser
 
 """ =========== *Remember to import your agent!!! =========== """
 from randomplayer import RandomPlayer
+from lucas_agents.simplified_advanced_cfr.simplified_advanced_cfr_player import SimplifiedAdvancedCFRPlayer
 # from smartwarrior import SmartWarrior
 """ ========================================================= """
 
@@ -33,10 +34,10 @@ def testperf(agent_name1, agent1, agent_name2, agent2):
 	config = setup_config(max_round=max_round, initial_stack=initial_stack, small_blind_amount=smallblind_amount)
 	
 	# Register players
-	config.register_player(name=agent_name1, algorithm=RandomPlayer())
-	config.register_player(name=agent_name2, algorithm=RandomPlayer())
-	# config.register_player(name=agent_name1, algorithm=agent1())
-	# config.register_player(name=agent_name2, algorithm=agent2())
+	# config.register_player(name=agent_name1, algorithm=RandomPlayer())
+	# config.register_player(name=agent_name2, algorithm=RandomPlayer())
+	config.register_player(name=agent_name1, algorithm=agent1())
+	config.register_player(name=agent_name2, algorithm=agent2())
 	
 
 	# Start playing num_game games
@@ -61,7 +62,7 @@ def testperf(agent_name1, agent1, agent_name2, agent2):
 		print("\n Congratulations! " + agent_name1 + " has won.")
 		# print("\n Random Player has won!")
 	else:
-		Print("\n It's a draw!") 
+		print("\n It's a draw!") 
 
 
 def parse_arguments():
