@@ -8,6 +8,9 @@ What it does:
   - before training, snapshots the current learned policy for fixed self-play
   - in each training game, samples one opponent from a weighted pool
   - default opponent mix favors fixed-policy self-play, then threshold, then random
+  - checkpoints policy + coverage during training
+  - retries or skips failed matches so one crash does not kill the whole run
+  - runs a 30-game evaluation every 50 training games for clearer win-rate plots
   - updates:
       - `learnable_cfr_policy.json`
       - `training_coverage.json`
@@ -21,6 +24,7 @@ import json
 import os
 import shutil
 import sys
+import traceback
 
 PLOT_CACHE_DIR = os.path.join(os.path.dirname(__file__), ".plot_cache")
 os.makedirs(PLOT_CACHE_DIR, exist_ok=True)
@@ -65,15 +69,20 @@ DEFAULT_EXPLORATION = 0.12
 DEFAULT_BASELINE_PRIOR_WEIGHT = 0.30
 DEFAULT_BASELINE_ASSIST = 0.08
 DEFAULT_SAVE_INTERVAL = 25
+DEFAULT_COVERAGE_INTERVAL = 25
 DEFAULT_DISCOUNT_INTERVAL = 500
 DEFAULT_DISCOUNT_FACTOR = 0.995
 DEFAULT_MIN_USE_STRATEGY_VISITS = 8
 DEFAULT_RANDOM_SEED = 7
+DEFAULT_MATCH_RETRIES = 2
+DEFAULT_EVAL_INTERVAL = 50
+DEFAULT_EVAL_GAMES = 30
 OPPONENT_WEIGHTS = {
-    "fixed_self": 0.70,
-    "threshold": 0.25,
-    "random": 0.05,
+    "threshold": 0.50,
+    "fixed_self": 0.40,
+    "random": 0.10,
 }
+EVAL_OPPONENTS = ("threshold", "random")
 PLOTS_DIR = os.path.join(os.path.dirname(__file__), "training_plots")
 
 
@@ -112,7 +121,7 @@ def build_opponent(name):
   raise ValueError(f"Unsupported opponent: {name}")
 
 
-def run_match(args, learner, opponent_name, learner_seat, match_index):
+def _play_match(args, learner, opponent_name, learner_seat, match_index):
   learner.set_training_context(opponent_name, learner_seat, match_index)
   opponent = build_opponent(opponent_name)
   config = setup_config(
@@ -145,29 +154,40 @@ def run_match(args, learner, opponent_name, learner_seat, match_index):
   return learner.round_count, learner_stack, opponent_stack
 
 
+def run_match(args, learner, opponent_name, learner_seat, match_index):
+  last_error = None
+  for attempt in range(1, DEFAULT_MATCH_RETRIES + 2):
+    try:
+      return _play_match(args, learner, opponent_name, learner_seat, match_index), None
+    except Exception as exc:
+      last_error = exc
+      print(
+          f"match_retry match={match_index} opponent={opponent_name} seat={learner_seat} "
+          f"attempt={attempt} error={type(exc).__name__}: {exc}"
+      )
+      print(traceback.format_exc().rstrip())
+      learner.round_decisions = []
+      learner._tracked_round = None
+  print(
+      f"match_skipped match={match_index} opponent={opponent_name} seat={learner_seat} "
+      f"error={type(last_error).__name__}: {last_error}"
+  )
+  return None, last_error
+
+
 def _init_plot_history():
   return {
       "games": [],
       "coverage_pct": [],
       "unique_states": [],
-      "overall_win_rate": [],
-      "opponents": {
-          name: {"games": [], "win_rate": [], "wins": 0, "matches": 0}
-          for name in OPPONENT_WEIGHTS
+      "eval_overall_win_rate": [],
+      "eval_opponents": {
+          name: {"games": [], "win_rate": []} for name in EVAL_OPPONENTS
       },
-      "wins": 0,
-      "matches": 0,
   }
 
 
-def _update_plot_history(history, game_index, game_results, learner):
-  for opponent_name, learner_stack, opponent_stack in game_results:
-    history["matches"] += 1
-    opponent_history = history["opponents"][opponent_name]
-    opponent_history["matches"] += 1
-    if learner_stack > opponent_stack:
-      history["wins"] += 1
-      opponent_history["wins"] += 1
+def _update_plot_history(history, game_index, learner, eval_summary=None):
   history["games"].append(game_index)
   history["coverage_pct"].append(
       100.0 * len(learner.state_visits) / learner.TOTAL_ABSTRACT_STATES
@@ -175,18 +195,12 @@ def _update_plot_history(history, game_index, game_results, learner):
       else 100.0 * len(learner.state_visits) / 23040.0
   )
   history["unique_states"].append(len(learner.state_visits))
-  history["overall_win_rate"].append(history["wins"] / max(history["matches"], 1))
 
-  seen = set()
-  for opponent_name, _, _ in game_results:
-    if opponent_name in seen:
-      continue
-    seen.add(opponent_name)
-    opponent_history = history["opponents"][opponent_name]
-    opponent_history["games"].append(game_index)
-    opponent_history["win_rate"].append(
-        opponent_history["wins"] / max(opponent_history["matches"], 1)
-    )
+  if eval_summary is not None:
+    history["eval_overall_win_rate"].append(eval_summary["overall_win_rate"])
+    for opponent_name, win_rate in eval_summary["by_opponent"].items():
+      history["eval_opponents"][opponent_name]["games"].append(game_index)
+      history["eval_opponents"][opponent_name]["win_rate"].append(win_rate)
 
 
 def _save_plots(run_id, history):
@@ -209,23 +223,27 @@ def _save_plots(run_id, history):
   axes[0].grid(alpha=0.3)
   axes[0].legend()
 
-  axes[1].plot(
-      history["games"],
-      [rate * 100.0 for rate in history["overall_win_rate"]],
-      linewidth=2,
-      label="overall",
-  )
-  for opponent_name, opponent_history in history["opponents"].items():
+  eval_games = history["eval_opponents"][EVAL_OPPONENTS[0]]["games"] if EVAL_OPPONENTS else []
+  if eval_games and history["eval_overall_win_rate"]:
+    axes[1].plot(
+        eval_games,
+        [rate * 100.0 for rate in history["eval_overall_win_rate"]],
+        linewidth=2,
+        marker="o",
+        label="overall eval",
+    )
+  for opponent_name, opponent_history in history["eval_opponents"].items():
     if not opponent_history["games"]:
       continue
     axes[1].plot(
         opponent_history["games"],
         [rate * 100.0 for rate in opponent_history["win_rate"]],
         linewidth=2,
-        label=opponent_name,
+        marker="o",
+        label=f"eval {opponent_name}",
     )
-  axes[1].set_title("Cumulative Win Rate by Training Game")
-  axes[1].set_xlabel("Training game")
+  axes[1].set_title("30-Game Evaluation Win Rate at 50-Game Checkpoints")
+  axes[1].set_xlabel("Training game checkpoint")
   axes[1].set_ylabel("Win rate %")
   axes[1].set_ylim(0, 100)
   axes[1].grid(alpha=0.3)
@@ -238,6 +256,75 @@ def _save_plots(run_id, history):
   plt.close(figure)
   print(f"saved_plot={latest_path}")
   print(f"saved_plot_run={run_path}")
+
+
+def checkpoint_coverage(learner, run_id, total_rounds, match_index):
+  learner.save_policy()
+  learner.finish_training_run(
+      {
+          "matches_played": match_index,
+          "total_rounds": total_rounds,
+          "final_unique_states": len(learner.state_visits),
+          "policy_path": DEFAULT_POLICY_PATH,
+          "coverage_path": DEFAULT_COVERAGE_PATH,
+          "checkpoint": True,
+      }
+  )
+  learner.begin_training_run(
+      {
+          "run_id": run_id,
+          "games": None,
+          "checkpoint_resume": True,
+          "policy_path": DEFAULT_POLICY_PATH,
+      }
+  )
+
+
+def run_checkpoint_eval(args, learner, game_index):
+  eval_player = LearnableCFRPlayer(
+      policy_path=DEFAULT_POLICY_PATH,
+      coverage_path=DEFAULT_COVERAGE_PATH,
+      exploration=0.0,
+      training_enabled=False,
+      save_interval=10**9,
+      baseline_prior_weight=DEFAULT_BASELINE_PRIOR_WEIGHT,
+      baseline_assist=0.0,
+      min_use_strategy_visits=DEFAULT_MIN_USE_STRATEGY_VISITS,
+      discount_interval=0,
+      discount_factor=1.0,
+      random_seed=DEFAULT_RANDOM_SEED,
+  )
+  total_wins = 0
+  total_matches = 0
+  by_opponent = {}
+  eval_args = argparse.Namespace(verbose=0)
+  for opponent_name in EVAL_OPPONENTS:
+    wins = 0
+    matches = 0
+    for eval_game in range(DEFAULT_EVAL_GAMES):
+      learner_seat = "player_a" if eval_game % 2 == 0 else "player_b"
+      result, error = run_match(eval_args, eval_player, opponent_name, learner_seat, eval_game + 1)
+      if error or result is None:
+        continue
+      _, learner_stack, opponent_stack = result
+      matches += 1
+      total_matches += 1
+      if learner_stack > opponent_stack:
+        wins += 1
+        total_wins += 1
+    by_opponent[opponent_name] = 0.0 if matches == 0 else wins / matches
+  summary = {
+      "game_index": game_index,
+      "overall_win_rate": 0.0 if total_matches == 0 else total_wins / total_matches,
+      "by_opponent": by_opponent,
+  }
+  print(
+      f"checkpoint_eval game={game_index} overall_win_rate={summary['overall_win_rate']:.4f} "
+      + " ".join(
+          f"{name}_win_rate={rate:.4f}" for name, rate in by_opponent.items()
+      )
+  )
+  return summary
 
 
 def main():
@@ -280,22 +367,32 @@ def main():
   plot_history = _init_plot_history()
   for game_index in range(1, args.games + 1):
     opponent_name = choose_opponent_name(learner)
-    game_results = []
     for learner_seat in ("player_a", "player_b"):
       match_index += 1
-      rounds_played, learner_stack, opponent_stack = run_match(
-          args, learner, opponent_name, learner_seat, match_index
-      )
+      result, error = run_match(args, learner, opponent_name, learner_seat, match_index)
+      if error or result is None:
+        print(
+            f"run={run_id} game={game_index}/{args.games} match={match_index} "
+            f"opponent={opponent_name} learner_seat={learner_seat} skipped=1 "
+            f"unique_states={len(learner.state_visits)}"
+        )
+        continue
+      rounds_played, learner_stack, opponent_stack = result
       total_rounds += rounds_played
-      game_results.append((opponent_name, learner_stack, opponent_stack))
       print(
           f"run={run_id} game={game_index}/{args.games} match={match_index} "
           f"opponent={opponent_name} learner_seat={learner_seat} "
           f"rounds={rounds_played} total_rounds={total_rounds} learner_stack={learner_stack} "
           f"unique_states={len(learner.state_visits)}"
       )
-    _update_plot_history(plot_history, game_index, game_results, learner)
+    eval_summary = None
+    if game_index % DEFAULT_EVAL_INTERVAL == 0:
+      learner.save_policy()
+      eval_summary = run_checkpoint_eval(args, learner, game_index)
+    _update_plot_history(plot_history, game_index, learner, eval_summary)
     _save_plots(run_id, plot_history)
+    if game_index % DEFAULT_COVERAGE_INTERVAL == 0:
+      checkpoint_coverage(learner, run_id, total_rounds, match_index)
 
   learner.save_policy()
   summary = learner.finish_training_run(
