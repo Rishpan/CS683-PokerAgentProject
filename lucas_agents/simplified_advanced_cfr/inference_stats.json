@@ -1,23 +1,23 @@
 {
-  "base_action_used": 3969,
+  "base_action_used": 50775,
   "by_street": {
     "flop": {
-      "base": 1512,
-      "learned": 93
+      "base": 13101,
+      "learned": 95
     },
     "preflop": {
-      "base": 821,
-      "learned": 1433
+      "base": 20523,
+      "learned": 1503
     },
     "river": {
-      "base": 624,
+      "base": 7173,
       "learned": 51
     },
     "turn": {
-      "base": 1012,
-      "learned": 61
+      "base": 9978,
+      "learned": 62
     }
   },
-  "learned_action_used": 1638,
-  "total_decisions": 5607
+  "learned_action_used": 1711,
+  "total_decisions": 52486
 }

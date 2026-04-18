@@ -372,6 +372,9 @@ def _normalize_average_strategy(action_map, legal_actions):
 
 class SimplifiedAdvancedCFRPlayer(BasePokerPlayer):
 
+  def __init__(self, use_learned_action=True):
+    self.use_learned_action = use_learned_action
+
   def declare_action(self, valid_actions, hole_card, round_state):
     # Load the trained policy lazily so setup stays identical to the simple template.
     if not hasattr(self, "_strategy_sum"):
@@ -394,7 +397,7 @@ class SimplifiedAdvancedCFRPlayer(BasePokerPlayer):
     used_learned_action = False
     learned_action = base_action
     learned_confidence = None
-    if average_strategy:
+    if self.use_learned_action and average_strategy:
       learned_action = max(average_strategy, key=average_strategy.get)
       learned_confidence = average_strategy[learned_action]
       if learned_action != base_action and learned_confidence >= 0.72:
