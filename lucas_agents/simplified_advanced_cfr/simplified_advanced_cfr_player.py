@@ -57,8 +57,11 @@ def _load_policy():
 def _read_json(path, default_value):
   if not os.path.exists(path):
     return default_value
-  with open(path, "r", encoding="utf-8") as source:
-    return json.load(source)
+  try:
+    with open(path, "r", encoding="utf-8") as source:
+      return json.load(source)
+  except (json.JSONDecodeError, OSError):
+    return default_value
 
 
 def _write_json(path, payload):

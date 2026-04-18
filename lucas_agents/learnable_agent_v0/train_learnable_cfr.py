@@ -34,10 +34,15 @@ os.makedirs(PLOT_CACHE_DIR, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", PLOT_CACHE_DIR)
 os.environ.setdefault("XDG_CACHE_HOME", PLOT_CACHE_DIR)
 
-import matplotlib
+try:
+  import matplotlib
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+  matplotlib.use("Agg")
+  import matplotlib.pyplot as plt
+  HAS_MATPLOTLIB = True
+except ModuleNotFoundError:
+  plt = None
+  HAS_MATPLOTLIB = False
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -52,9 +57,6 @@ from lucas_agents.learnable_agent_v0.learnable_cfr_player import (
     LearnableCFRPlayer,
 )
 from lucas_agents.learnable_agent_v0.threshold_based_player import ThresholdBasedPlayer
-from lucas_agents.simplified_advanced_cfr.simplified_advanced_cfr_player import (
-    SimplifiedAdvancedCFRPlayer,
-)
 
 
 DEFAULT_GAMES = 150
@@ -69,7 +71,7 @@ DEFAULT_DISCOUNT_INTERVAL = 500
 DEFAULT_DISCOUNT_FACTOR = 0.995
 DEFAULT_MIN_USE_STRATEGY_VISITS = 8
 DEFAULT_RANDOM_SEED = 7
-OPPONENTS = ("threshold", "simplified_advanced_cfr")
+OPPONENTS = ("threshold",)
 PLOTS_DIR = os.path.join(os.path.dirname(__file__), "training_plots")
 
 
@@ -86,8 +88,6 @@ def build_opponent(name):
   """Instantiate one supported training opponent."""
   if name == "threshold":
     return ThresholdBasedPlayer()
-  if name == "simplified_advanced_cfr":
-    return SimplifiedAdvancedCFRPlayer(use_learned_action=True)
   raise ValueError(f"Unsupported opponent: {name}")
 
 
@@ -173,6 +173,9 @@ def _update_plot_history(history, game_index, game_results, learner):
 
 def _save_plots(run_id, history):
   """Save the latest coverage and win-rate charts for this training run."""
+  if not HAS_MATPLOTLIB:
+    return
+
   os.makedirs(PLOTS_DIR, exist_ok=True)
   figure, axes = plt.subplots(2, 1, figsize=(9, 8), tight_layout=True)
   game_ticks = history["games"] or [1]
