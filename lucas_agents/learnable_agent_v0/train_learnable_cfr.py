@@ -5,28 +5,21 @@ Usage:
 
 What it does:
   - trains the CFR player for `games` training games
-  - in each training game, plays against every opponent in `OPPONENTS`
-  - for each opponent, plays once as `player_a` and once as `player_b`
+  - before training, snapshots the current learned policy for fixed self-play
+  - in each training game, samples one opponent from a weighted pool
+  - default opponent mix favors fixed-policy self-play, then threshold, then random
   - updates:
       - `learnable_cfr_policy.json`
       - `training_coverage.json`
       - `training_plots/latest.png`
       - `training_plots/<run_id>.png`
-
-What to expect:
-  - the coverage plot should usually increase over time, then flatten as learning
-    starts revisiting existing abstract states more often
-  - the win-rate plot can be noisy early, especially for small runs
-  - a single-game run still creates a plot, but it only contains one point
-
-How to add more players:
-  1. Add the player name to `OPPONENTS`
-  2. Extend `build_opponent(...)` with that name and class
-  3. Re-run training; the per-opponent win-rate line is added automatically
+      - `fixed_policy_snapshot.json`
 """
 
 import argparse
+import json
 import os
+import shutil
 import sys
 
 PLOT_CACHE_DIR = os.path.join(os.path.dirname(__file__), ".plot_cache")
@@ -51,11 +44,16 @@ if PROJECT_ROOT not in sys.path:
 
 from pypokerengine.api.game import setup_config, start_poker
 
+from lucas_agents.learnable_agent_v0.fixed_policy_player import (
+    DEFAULT_FIXED_POLICY_PATH,
+    FixedPolicyLearnablePlayer,
+)
 from lucas_agents.learnable_agent_v0.learnable_cfr_player import (
     DEFAULT_COVERAGE_PATH,
     DEFAULT_POLICY_PATH,
     LearnableCFRPlayer,
 )
+from lucas_agents.learnable_agent_v0.random_player_wrapper import setup_ai as setup_random_ai
 from lucas_agents.learnable_agent_v0.threshold_based_player import ThresholdBasedPlayer
 
 
@@ -66,17 +64,20 @@ DEFAULT_MAX_ROUNDS = 80
 DEFAULT_EXPLORATION = 0.12
 DEFAULT_BASELINE_PRIOR_WEIGHT = 0.30
 DEFAULT_BASELINE_ASSIST = 0.08
-DEFAULT_SAVE_INTERVAL = 100
+DEFAULT_SAVE_INTERVAL = 25
 DEFAULT_DISCOUNT_INTERVAL = 500
 DEFAULT_DISCOUNT_FACTOR = 0.995
 DEFAULT_MIN_USE_STRATEGY_VISITS = 8
 DEFAULT_RANDOM_SEED = 7
-OPPONENTS = ("threshold",)
+OPPONENT_WEIGHTS = {
+    "fixed_self": 0.70,
+    "threshold": 0.25,
+    "random": 0.05,
+}
 PLOTS_DIR = os.path.join(os.path.dirname(__file__), "training_plots")
 
 
 def parse_args():
-  """Parse the single training argument: number of training games."""
   parser = argparse.ArgumentParser(
       description="Train the learnable_agent_v0 CFR player."
   )
@@ -84,15 +85,34 @@ def parse_args():
   return parser.parse_args()
 
 
+def snapshot_policy(source_path=DEFAULT_POLICY_PATH, snapshot_path=DEFAULT_FIXED_POLICY_PATH):
+  os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
+  if os.path.exists(source_path):
+    shutil.copyfile(source_path, snapshot_path)
+    return snapshot_path
+  payload = {"strategy_sum": {}, "meta": {"snapshot_created_without_source": True}}
+  with open(snapshot_path, "w", encoding="utf-8") as output:
+    json.dump(payload, output, indent=2, sort_keys=True)
+  return snapshot_path
+
+
+def choose_opponent_name(learner):
+  names = list(OPPONENT_WEIGHTS.keys())
+  weights = [OPPONENT_WEIGHTS[name] for name in names]
+  return learner.random.choices(names, weights=weights, k=1)[0]
+
+
 def build_opponent(name):
-  """Instantiate one supported training opponent."""
+  if name == "fixed_self":
+    return FixedPolicyLearnablePlayer(policy_path=DEFAULT_FIXED_POLICY_PATH)
   if name == "threshold":
     return ThresholdBasedPlayer()
+  if name == "random":
+    return setup_random_ai()
   raise ValueError(f"Unsupported opponent: {name}")
 
 
 def run_match(args, learner, opponent_name, learner_seat, match_index):
-  """Run one learner-vs-opponent match for a fixed seat assignment."""
   learner.set_training_context(opponent_name, learner_seat, match_index)
   opponent = build_opponent(opponent_name)
   config = setup_config(
@@ -126,7 +146,6 @@ def run_match(args, learner, opponent_name, learner_seat, match_index):
 
 
 def _init_plot_history():
-  """Create the in-memory history used for coverage and win-rate plots."""
   return {
       "games": [],
       "coverage_pct": [],
@@ -134,7 +153,7 @@ def _init_plot_history():
       "overall_win_rate": [],
       "opponents": {
           name: {"games": [], "win_rate": [], "wins": 0, "matches": 0}
-          for name in OPPONENTS
+          for name in OPPONENT_WEIGHTS
       },
       "wins": 0,
       "matches": 0,
@@ -142,7 +161,6 @@ def _init_plot_history():
 
 
 def _update_plot_history(history, game_index, game_results, learner):
-  """Append one training game's results to the plotting history."""
   for opponent_name, learner_stack, opponent_stack in game_results:
     history["matches"] += 1
     opponent_history = history["opponents"][opponent_name]
@@ -172,26 +190,22 @@ def _update_plot_history(history, game_index, game_results, learner):
 
 
 def _save_plots(run_id, history):
-  """Save the latest coverage and win-rate charts for this training run."""
   if not HAS_MATPLOTLIB:
+    print("plotting_skipped=matplotlib_not_installed")
     return
 
   os.makedirs(PLOTS_DIR, exist_ok=True)
   figure, axes = plt.subplots(2, 1, figsize=(9, 8), tight_layout=True)
-  game_ticks = history["games"] or [1]
 
   axes[0].plot(
       history["games"],
       history["coverage_pct"],
       linewidth=2,
-      marker="o",
-      markersize=5,
       label="coverage %",
   )
   axes[0].set_title("Abstract State Coverage by Training Game")
   axes[0].set_xlabel("Training game")
   axes[0].set_ylabel("Coverage %")
-  axes[0].set_xticks(game_ticks)
   axes[0].grid(alpha=0.3)
   axes[0].legend()
 
@@ -199,24 +213,21 @@ def _save_plots(run_id, history):
       history["games"],
       [rate * 100.0 for rate in history["overall_win_rate"]],
       linewidth=2,
-      marker="o",
-      markersize=5,
       label="overall",
   )
   for opponent_name, opponent_history in history["opponents"].items():
+    if not opponent_history["games"]:
+      continue
     axes[1].plot(
         opponent_history["games"],
         [rate * 100.0 for rate in opponent_history["win_rate"]],
         linewidth=2,
-        marker="o",
-        markersize=5,
         label=opponent_name,
     )
   axes[1].set_title("Cumulative Win Rate by Training Game")
   axes[1].set_xlabel("Training game")
   axes[1].set_ylabel("Win rate %")
   axes[1].set_ylim(0, 100)
-  axes[1].set_xticks(game_ticks)
   axes[1].grid(alpha=0.3)
   axes[1].legend()
 
@@ -225,11 +236,14 @@ def _save_plots(run_id, history):
   figure.savefig(run_path, dpi=160)
   figure.savefig(latest_path, dpi=160)
   plt.close(figure)
+  print(f"saved_plot={latest_path}")
+  print(f"saved_plot_run={run_path}")
 
 
 def main():
   args = parse_args()
   args.verbose = 0
+  snapshot_path = snapshot_policy()
   learner = LearnableCFRPlayer(
       policy_path=DEFAULT_POLICY_PATH,
       coverage_path=DEFAULT_COVERAGE_PATH,
@@ -254,9 +268,10 @@ def main():
           "baseline_prior_weight": DEFAULT_BASELINE_PRIOR_WEIGHT,
           "baseline_assist": DEFAULT_BASELINE_ASSIST,
           "min_use_strategy_visits": DEFAULT_MIN_USE_STRATEGY_VISITS,
-          "opponents": list(OPPONENTS),
+          "opponent_weights": OPPONENT_WEIGHTS,
           "seat_cycle": ["player_a", "player_b"],
           "policy_path": DEFAULT_POLICY_PATH,
+          "fixed_policy_snapshot": snapshot_path,
       }
   )
 
@@ -264,21 +279,21 @@ def main():
   match_index = 0
   plot_history = _init_plot_history()
   for game_index in range(1, args.games + 1):
+    opponent_name = choose_opponent_name(learner)
     game_results = []
-    for opponent_name in OPPONENTS:
-      for learner_seat in ("player_a", "player_b"):
-        match_index += 1
-        rounds_played, learner_stack, opponent_stack = run_match(
-            args, learner, opponent_name, learner_seat, match_index
-        )
-        total_rounds += rounds_played
-        game_results.append((opponent_name, learner_stack, opponent_stack))
-        print(
-            f"run={run_id} game={game_index}/{args.games} match={match_index} "
-            f"opponent={opponent_name} learner_seat={learner_seat} "
-            f"rounds={rounds_played} total_rounds={total_rounds} learner_stack={learner_stack} "
-            f"unique_states={len(learner.state_visits)}"
-        )
+    for learner_seat in ("player_a", "player_b"):
+      match_index += 1
+      rounds_played, learner_stack, opponent_stack = run_match(
+          args, learner, opponent_name, learner_seat, match_index
+      )
+      total_rounds += rounds_played
+      game_results.append((opponent_name, learner_stack, opponent_stack))
+      print(
+          f"run={run_id} game={game_index}/{args.games} match={match_index} "
+          f"opponent={opponent_name} learner_seat={learner_seat} "
+          f"rounds={rounds_played} total_rounds={total_rounds} learner_stack={learner_stack} "
+          f"unique_states={len(learner.state_visits)}"
+      )
     _update_plot_history(plot_history, game_index, game_results, learner)
     _save_plots(run_id, plot_history)
 
@@ -290,10 +305,12 @@ def main():
           "final_unique_states": len(learner.state_visits),
           "policy_path": DEFAULT_POLICY_PATH,
           "coverage_path": DEFAULT_COVERAGE_PATH,
+          "fixed_policy_snapshot": snapshot_path,
       }
   )
   print(f"saved_policy={DEFAULT_POLICY_PATH}")
   print(f"saved_coverage={DEFAULT_COVERAGE_PATH}")
+  print(f"saved_fixed_policy_snapshot={snapshot_path}")
   if summary:
     print(
         f"coverage_delta={summary['new_state_count']} "
