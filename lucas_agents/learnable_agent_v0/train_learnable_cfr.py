@@ -1,23 +1,4 @@
-"""Simple trainer for `learnable_agent_v0`.
-
-Usage:
-  python3 lucas_agents/learnable_agent_v0/train_learnable_cfr.py 150
-
-What it does:
-  - trains the CFR player for `games` training games
-  - before training, snapshots the current learned policy for fixed self-play
-  - in each training game, samples one opponent from a weighted pool
-  - default opponent mix favors fixed-policy self-play, then threshold, then random
-  - checkpoints policy + coverage during training
-  - retries or skips failed matches so one crash does not kill the whole run
-  - runs a 30-game evaluation every 50 training games for clearer win-rate plots
-  - updates:
-      - `learnable_cfr_policy.json`
-      - `training_coverage.json`
-      - `training_plots/latest.png`
-      - `training_plots/<run_id>.png`
-      - `fixed_policy_snapshot.json`
-"""
+"""Trainer for `learnable_agent_v0` with robust checkpoints and rule-based focus."""
 
 import argparse
 import json
@@ -54,6 +35,7 @@ from lucas_agents.learnable_agent_v0.fixed_policy_player import (
 )
 from lucas_agents.learnable_agent_v0.learnable_cfr_player import (
     DEFAULT_COVERAGE_PATH,
+    DEFAULT_EXPLOIT_PATH,
     DEFAULT_POLICY_PATH,
     LearnableCFRPlayer,
 )
@@ -61,13 +43,13 @@ from lucas_agents.condition_threshold_player import ConditionThresholdPlayer
 from lucas_agents.learnable_agent_v0.threshold_based_player import ThresholdBasedPlayer
 
 
-DEFAULT_GAMES = 150
+DEFAULT_GAMES = 300
 DEFAULT_STACK = 500
 DEFAULT_SMALL_BLIND = 10
 DEFAULT_MAX_ROUNDS = 80
-DEFAULT_EXPLORATION = 0.12
-DEFAULT_BASELINE_PRIOR_WEIGHT = 0.30
-DEFAULT_BASELINE_ASSIST = 0.08
+DEFAULT_EXPLORATION = 0.10
+DEFAULT_BASELINE_PRIOR_WEIGHT = 0.28
+DEFAULT_BASELINE_ASSIST = 0.07
 DEFAULT_SAVE_INTERVAL = 25
 DEFAULT_COVERAGE_INTERVAL = 25
 DEFAULT_DISCOUNT_INTERVAL = 500
@@ -77,19 +59,27 @@ DEFAULT_RANDOM_SEED = 7
 DEFAULT_MATCH_RETRIES = 2
 DEFAULT_EVAL_INTERVAL = 50
 DEFAULT_EVAL_GAMES = 30
-OPPONENT_WEIGHTS = {
+STAGE_A_END = 200
+STAGE_A_WEIGHTS = {
     "threshold": 0.35,
     "condition_threshold": 0.35,
     "fixed_self": 0.30,
 }
+STAGE_B_WEIGHTS = {
+    "threshold": 0.40,
+    "condition_threshold": 0.40,
+    "fixed_self": 0.20,
+}
 EVAL_OPPONENTS = ("threshold", "condition_threshold", "fixed_self")
 PLOTS_DIR = os.path.join(os.path.dirname(__file__), "training_plots")
+BEST_THRESHOLD_PATH = os.path.join(os.path.dirname(__file__), "best_vs_threshold_policy.json")
+BEST_CONDITION_PATH = os.path.join(os.path.dirname(__file__), "best_vs_condition_threshold_policy.json")
+BEST_ROBUST_PATH = os.path.join(os.path.dirname(__file__), "best_robust_policy.json")
+BEST_SUMMARY_PATH = os.path.join(os.path.dirname(__file__), "best_checkpoint_summary.json")
 
 
 def parse_args():
-  parser = argparse.ArgumentParser(
-      description="Train the learnable_agent_v0 CFR player."
-  )
+  parser = argparse.ArgumentParser(description="Train the learnable_agent_v0 CFR player.")
   parser.add_argument("games", nargs="?", type=int, default=DEFAULT_GAMES)
   return parser.parse_args()
 
@@ -105,9 +95,14 @@ def snapshot_policy(source_path=DEFAULT_POLICY_PATH, snapshot_path=DEFAULT_FIXED
   return snapshot_path
 
 
-def choose_opponent_name(learner):
-  names = list(OPPONENT_WEIGHTS.keys())
-  weights = [OPPONENT_WEIGHTS[name] for name in names]
+def current_opponent_weights(game_index):
+  return STAGE_A_WEIGHTS if game_index <= STAGE_A_END else STAGE_B_WEIGHTS
+
+
+def choose_opponent_name(learner, game_index):
+  weights_map = current_opponent_weights(game_index)
+  names = list(weights_map.keys())
+  weights = [weights_map[name] for name in names]
   return learner.random.choices(names, weights=weights, k=1)[0]
 
 
@@ -139,18 +134,10 @@ def _play_match(args, learner, opponent_name, learner_seat, match_index):
 
   result = start_poker(config, verbose=args.verbose)
   learner.finish_game(result["players"], DEFAULT_SMALL_BLIND)
-  learner_stack = next(
-      player["stack"]
-      for player in result["players"]
-      if player["name"] == learner_seat
-  )
+  learner_stack = next(player["stack"] for player in result["players"] if player["name"] == learner_seat)
   if learner._active_run:
     learner._active_run["matches"] += 1
-  opponent_stack = next(
-      player["stack"]
-      for player in result["players"]
-      if player["name"] != learner_seat
-  )
+  opponent_stack = next(player["stack"] for player in result["players"] if player["name"] != learner_seat)
   return learner.round_count, learner_stack, opponent_stack
 
 
@@ -181,19 +168,14 @@ def _init_plot_history():
       "coverage_pct": [],
       "unique_states": [],
       "eval_overall_win_rate": [],
-      "eval_opponents": {
-          name: {"games": [], "win_rate": []} for name in EVAL_OPPONENTS
-      },
+      "eval_opponents": {name: {"games": [], "win_rate": []} for name in EVAL_OPPONENTS},
+      "best_robust": [],
   }
 
 
-def _update_plot_history(history, game_index, learner, eval_summary=None):
+def _update_plot_history(history, game_index, learner, eval_summary=None, best_summary=None):
   history["games"].append(game_index)
-  history["coverage_pct"].append(
-      100.0 * len(learner.state_visits) / learner.TOTAL_ABSTRACT_STATES
-      if hasattr(learner, "TOTAL_ABSTRACT_STATES")
-      else 100.0 * len(learner.state_visits) / 23040.0
-  )
+  history["coverage_pct"].append(100.0 * len(learner.state_visits) / learner.TOTAL_ABSTRACT_STATES)
   history["unique_states"].append(len(learner.state_visits))
 
   if eval_summary is not None:
@@ -203,6 +185,8 @@ def _update_plot_history(history, game_index, learner, eval_summary=None):
         continue
       history["eval_opponents"][opponent_name]["games"].append(game_index)
       history["eval_opponents"][opponent_name]["win_rate"].append(win_rate)
+  if best_summary is not None:
+    history["best_robust"].append((game_index, best_summary.get("best_robust_score", 0.0)))
 
 
 def _save_plots(run_id, history):
@@ -213,12 +197,7 @@ def _save_plots(run_id, history):
   os.makedirs(PLOTS_DIR, exist_ok=True)
   figure, axes = plt.subplots(2, 1, figsize=(9, 8), tight_layout=True)
 
-  axes[0].plot(
-      history["games"],
-      history["coverage_pct"],
-      linewidth=2,
-      label="coverage %",
-  )
+  axes[0].plot(history["games"], history["coverage_pct"], linewidth=2, label="coverage %")
   axes[0].set_title("Abstract State Coverage by Training Game")
   axes[0].set_xlabel("Training game")
   axes[0].set_ylabel("Coverage %")
@@ -226,6 +205,7 @@ def _save_plots(run_id, history):
   axes[0].legend()
 
   eval_games = history["eval_opponents"][EVAL_OPPONENTS[0]]["games"] if EVAL_OPPONENTS else []
+  plotted = False
   if eval_games and history["eval_overall_win_rate"]:
     axes[1].plot(
         eval_games,
@@ -234,6 +214,7 @@ def _save_plots(run_id, history):
         marker="o",
         label="overall eval",
     )
+    plotted = True
   for opponent_name, opponent_history in history["eval_opponents"].items():
     if not opponent_history["games"]:
       continue
@@ -244,12 +225,23 @@ def _save_plots(run_id, history):
         marker="o",
         label=f"eval {opponent_name}",
     )
-  axes[1].set_title("30-Game Evaluation Win Rate at 50-Game Checkpoints")
+    plotted = True
+  if history["best_robust"]:
+    axes[1].plot(
+        [item[0] for item in history["best_robust"]],
+        [item[1] * 100.0 for item in history["best_robust"]],
+        linewidth=2,
+        linestyle="--",
+        label="best robust so far",
+    )
+    plotted = True
+  axes[1].set_title("Checkpoint Evaluation Win Rate")
   axes[1].set_xlabel("Training game checkpoint")
   axes[1].set_ylabel("Win rate %")
   axes[1].set_ylim(0, 100)
   axes[1].grid(alpha=0.3)
-  axes[1].legend()
+  if plotted:
+    axes[1].legend()
 
   run_path = os.path.join(PLOTS_DIR, f"{run_id}.png")
   latest_path = os.path.join(PLOTS_DIR, "latest.png")
@@ -282,7 +274,7 @@ def checkpoint_coverage(learner, run_id, total_rounds, match_index):
   )
 
 
-def run_checkpoint_eval(args, learner, game_index):
+def run_checkpoint_eval(game_index):
   eval_player = LearnableCFRPlayer(
       policy_path=DEFAULT_POLICY_PATH,
       coverage_path=DEFAULT_COVERAGE_PATH,
@@ -295,6 +287,7 @@ def run_checkpoint_eval(args, learner, game_index):
       discount_interval=0,
       discount_factor=1.0,
       random_seed=DEFAULT_RANDOM_SEED,
+      exploit_path=DEFAULT_EXPLOIT_PATH,
   )
   total_wins = 0
   total_matches = 0
@@ -330,6 +323,44 @@ def run_checkpoint_eval(args, learner, game_index):
   return summary
 
 
+def maybe_save_best_checkpoints(eval_summary):
+  payload = {
+      "best_vs_threshold": {"score": -1.0, "game": None},
+      "best_vs_condition_threshold": {"score": -1.0, "game": None},
+      "best_robust": {"score": -1.0, "game": None},
+  }
+  if os.path.exists(BEST_SUMMARY_PATH):
+    with open(BEST_SUMMARY_PATH, "r", encoding="utf-8") as source:
+      payload = json.load(source)
+
+  threshold_score = eval_summary["by_opponent"].get("threshold")
+  condition_score = eval_summary["by_opponent"].get("condition_threshold")
+  robust_score = min(
+      score for score in [threshold_score, condition_score] if score is not None
+  ) if any(score is not None for score in [threshold_score, condition_score]) else None
+
+  changed = False
+  if threshold_score is not None and threshold_score > payload["best_vs_threshold"]["score"]:
+    shutil.copyfile(DEFAULT_POLICY_PATH, BEST_THRESHOLD_PATH)
+    payload["best_vs_threshold"] = {"score": threshold_score, "game": eval_summary["game_index"]}
+    changed = True
+  if condition_score is not None and condition_score > payload["best_vs_condition_threshold"]["score"]:
+    shutil.copyfile(DEFAULT_POLICY_PATH, BEST_CONDITION_PATH)
+    payload["best_vs_condition_threshold"] = {"score": condition_score, "game": eval_summary["game_index"]}
+    changed = True
+  if robust_score is not None and robust_score > payload["best_robust"]["score"]:
+    shutil.copyfile(DEFAULT_POLICY_PATH, BEST_ROBUST_PATH)
+    payload["best_robust"] = {"score": robust_score, "game": eval_summary["game_index"]}
+    changed = True
+
+  payload["last_eval"] = eval_summary
+  payload["best_robust_score"] = payload["best_robust"]["score"]
+  if changed or not os.path.exists(BEST_SUMMARY_PATH):
+    with open(BEST_SUMMARY_PATH, "w", encoding="utf-8") as output:
+      json.dump(payload, output, indent=2, sort_keys=True)
+  return payload
+
+
 def main():
   args = parse_args()
   args.verbose = 0
@@ -346,6 +377,9 @@ def main():
       discount_interval=DEFAULT_DISCOUNT_INTERVAL,
       discount_factor=DEFAULT_DISCOUNT_FACTOR,
       random_seed=DEFAULT_RANDOM_SEED,
+      exploit_path=DEFAULT_EXPLOIT_PATH,
+      exploit_strength=0.18,
+      exploit_update_rate=0.035,
   )
 
   run_id = learner.begin_training_run(
@@ -358,7 +392,9 @@ def main():
           "baseline_prior_weight": DEFAULT_BASELINE_PRIOR_WEIGHT,
           "baseline_assist": DEFAULT_BASELINE_ASSIST,
           "min_use_strategy_visits": DEFAULT_MIN_USE_STRATEGY_VISITS,
-          "opponent_weights": OPPONENT_WEIGHTS,
+          "stage_a_weights": STAGE_A_WEIGHTS,
+          "stage_b_weights": STAGE_B_WEIGHTS,
+          "stage_a_end": STAGE_A_END,
           "seat_cycle": ["player_a", "player_b"],
           "policy_path": DEFAULT_POLICY_PATH,
           "fixed_policy_snapshot": snapshot_path,
@@ -368,8 +404,9 @@ def main():
   total_rounds = 0
   match_index = 0
   plot_history = _init_plot_history()
+  best_summary = None
   for game_index in range(1, args.games + 1):
-    opponent_name = choose_opponent_name(learner)
+    opponent_name = choose_opponent_name(learner, game_index)
     for learner_seat in ("player_a", "player_b"):
       match_index += 1
       result, error = run_match(args, learner, opponent_name, learner_seat, match_index)
@@ -388,11 +425,13 @@ def main():
           f"rounds={rounds_played} total_rounds={total_rounds} learner_stack={learner_stack} "
           f"unique_states={len(learner.state_visits)}"
       )
+
     eval_summary = None
     if game_index % DEFAULT_EVAL_INTERVAL == 0:
       learner.save_policy()
-      eval_summary = run_checkpoint_eval(args, learner, game_index)
-    _update_plot_history(plot_history, game_index, learner, eval_summary)
+      eval_summary = run_checkpoint_eval(game_index)
+      best_summary = maybe_save_best_checkpoints(eval_summary)
+    _update_plot_history(plot_history, game_index, learner, eval_summary, best_summary)
     _save_plots(run_id, plot_history)
     if game_index % DEFAULT_COVERAGE_INTERVAL == 0:
       checkpoint_coverage(learner, run_id, total_rounds, match_index)
@@ -411,6 +450,10 @@ def main():
   print(f"saved_policy={DEFAULT_POLICY_PATH}")
   print(f"saved_coverage={DEFAULT_COVERAGE_PATH}")
   print(f"saved_fixed_policy_snapshot={snapshot_path}")
+  print(f"saved_best_threshold={BEST_THRESHOLD_PATH}")
+  print(f"saved_best_condition={BEST_CONDITION_PATH}")
+  print(f"saved_best_robust={BEST_ROBUST_PATH}")
+  print(f"saved_best_summary={BEST_SUMMARY_PATH}")
   if summary:
     print(
         f"coverage_delta={summary['new_state_count']} "

@@ -31,6 +31,9 @@ DEFAULT_POLICY_PATH = os.path.join(
 DEFAULT_COVERAGE_PATH = os.path.join(
     os.path.dirname(__file__), "training_coverage.json"
 )
+DEFAULT_EXPLOIT_PATH = os.path.join(
+    os.path.dirname(__file__), "learnable_cfr_exploit_bias.json"
+)
 
 
 def _utc_now():
@@ -251,12 +254,6 @@ def _adjust_for_history(
 
 
 class LearnableCFRPlayer(BasePokerPlayer):
-  """Online CFR-style player with a mild threshold-policy warm start.
-
-  The threshold baseline only shapes unseen or low-visit states. As visits
-  accumulate, regret matching and the saved average strategy dominate decisions.
-  """
-
   TOTAL_ABSTRACT_STATES = TOTAL_ABSTRACT_STATES
 
   def __init__(
@@ -272,9 +269,13 @@ class LearnableCFRPlayer(BasePokerPlayer):
       discount_interval=0,
       discount_factor=0.995,
       random_seed=None,
+      exploit_path=None,
+      exploit_strength=0.18,
+      exploit_update_rate=0.035,
   ):
     self.policy_path = policy_path or DEFAULT_POLICY_PATH
     self.coverage_path = coverage_path or DEFAULT_COVERAGE_PATH
+    self.exploit_path = exploit_path or DEFAULT_EXPLOIT_PATH
     self.exploration = max(0.0, float(exploration))
     self.training_enabled = training_enabled
     self.save_interval = max(1, int(save_interval))
@@ -283,12 +284,15 @@ class LearnableCFRPlayer(BasePokerPlayer):
     self.min_use_strategy_visits = max(1, int(min_use_strategy_visits))
     self.discount_interval = max(0, int(discount_interval))
     self.discount_factor = min(1.0, max(0.90, float(discount_factor)))
+    self.exploit_strength = max(0.0, float(exploit_strength))
+    self.exploit_update_rate = max(0.0, float(exploit_update_rate))
     self.random = random.Random(random_seed)
 
     self.regret_sum = {}
     self.strategy_sum = {}
     self.state_visits = {}
     self.state_examples = {}
+    self.exploit_bias = {}
     self.round_decisions = []
     self.round_start_stack = 0
     self.round_count = 0
@@ -351,11 +355,13 @@ class LearnableCFRPlayer(BasePokerPlayer):
         "total_state_visits": total_state_visits,
         "policy_path": self.policy_path,
         "coverage_path": self.coverage_path,
+        "exploit_path": self.exploit_path,
     }
     payload["training"] = {
         "regret_sum": self.regret_sum,
         "state_visits": self.state_visits,
         "state_examples": self.state_examples,
+        "exploit_bias": self.exploit_bias,
         "config": {
             "exploration": self.exploration,
             "baseline_prior_weight": self.baseline_prior_weight,
@@ -363,6 +369,8 @@ class LearnableCFRPlayer(BasePokerPlayer):
             "min_use_strategy_visits": self.min_use_strategy_visits,
             "discount_interval": self.discount_interval,
             "discount_factor": self.discount_factor,
+            "exploit_strength": self.exploit_strength,
+            "exploit_update_rate": self.exploit_update_rate,
         },
     }
 
@@ -418,7 +426,7 @@ class LearnableCFRPlayer(BasePokerPlayer):
     self._register_state_visit(info_key, features)
 
     if self.training_enabled:
-      strategy = self._current_strategy(info_key, legal_actions, baseline_action)
+      strategy = self._current_strategy(info_key, legal_actions, baseline_action, features)
       chosen_action = self._sample_action(strategy, legal_actions)
       self.round_decisions.append(
           {
@@ -436,9 +444,15 @@ class LearnableCFRPlayer(BasePokerPlayer):
     average_strategy = self._average_strategy(info_key, legal_actions)
     visit_count = self.state_visits.get(info_key, 0)
     if average_strategy and visit_count >= self.min_use_strategy_visits:
-      return max(average_strategy, key=average_strategy.get)
+      final_strategy = self._apply_exploit_bias(
+          info_key, average_strategy, legal_actions, features, self.current_context["opponent"]
+      )
+      return max(final_strategy, key=final_strategy.get)
     if average_strategy and visit_count > 0:
       blended = self._blend_with_prior(average_strategy, legal_actions, baseline_action, visit_count)
+      blended = self._apply_exploit_bias(
+          info_key, blended, legal_actions, features, self.current_context["opponent"]
+      )
       return max(blended, key=blended.get)
     return baseline_action
 
@@ -472,18 +486,31 @@ class LearnableCFRPlayer(BasePokerPlayer):
         },
     }
     _write_json(self.policy_path, payload)
+    _write_json(
+        self.exploit_path,
+        {
+            "exploit_bias": self.exploit_bias,
+            "meta": {
+                "saved_at": _utc_now(),
+                "exploit_strength": self.exploit_strength,
+                "exploit_update_rate": self.exploit_update_rate,
+            },
+        },
+    )
 
   def _load_policy(self):
     policy_payload = _read_json(self.policy_path, {"strategy_sum": {}})
     coverage_payload = _read_json(
         self.coverage_path,
-        {"training": {"regret_sum": {}, "state_visits": {}, "state_examples": {}}},
+        {"training": {"regret_sum": {}, "state_visits": {}, "state_examples": {}, "exploit_bias": {}}},
     )
+    exploit_payload = _read_json(self.exploit_path, {"exploit_bias": {}})
     training_payload = coverage_payload.get("training", {})
     self.regret_sum = training_payload.get("regret_sum", {})
     self.strategy_sum = policy_payload.get("strategy_sum", {})
     self.state_visits = training_payload.get("state_visits", {})
     self.state_examples = training_payload.get("state_examples", {})
+    self.exploit_bias = training_payload.get("exploit_bias") or exploit_payload.get("exploit_bias", {})
 
   def _build_info_set(self, hole_card, round_state):
     to_call = self._amount_to_call(round_state)
@@ -535,6 +562,7 @@ class LearnableCFRPlayer(BasePokerPlayer):
     normalized_reward = max(-1.0, min(1.0, float(chip_delta) / normalizer))
     for decision in self.round_decisions:
       self._apply_regret_update(decision, normalized_reward)
+      self._update_exploit_bias(decision, normalized_reward)
     if self.discount_interval and self.round_count % self.discount_interval == 0:
       self._discount_tables()
     if self.round_count % self.save_interval == 0:
@@ -558,7 +586,7 @@ class LearnableCFRPlayer(BasePokerPlayer):
     self._active_run["by_opponent"][opponent] = self._active_run["by_opponent"].get(opponent, 0) + 1
     self._active_run["by_seat"][seat] = self._active_run["by_seat"].get(seat, 0) + 1
 
-  def _current_strategy(self, info_key, legal_actions, baseline_action):
+  def _current_strategy(self, info_key, legal_actions, baseline_action, features):
     regrets = self.regret_sum.setdefault(info_key, self._zero_action_map())
     strategy_sums = self.strategy_sum.setdefault(info_key, self._zero_action_map())
     positive = {
@@ -575,6 +603,10 @@ class LearnableCFRPlayer(BasePokerPlayer):
     else:
       strategy = self._prior_strategy(legal_actions, baseline_action)
 
+    strategy = self._apply_exploit_bias(
+        info_key, strategy, legal_actions, features, self.current_context["opponent"]
+    )
+
     if self.training_enabled and self.exploration > 0:
       uniform_share = 1.0 / max(len(legal_actions), 1)
       for action in ACTIONS:
@@ -583,6 +615,12 @@ class LearnableCFRPlayer(BasePokerPlayer):
               (1.0 - self.exploration) * strategy[action]
               + self.exploration * uniform_share
           )
+
+    total = sum(strategy[action] for action in ACTIONS if action in legal_actions)
+    if total > 0:
+      for action in ACTIONS:
+        if action in legal_actions:
+          strategy[action] /= total
 
     for action in ACTIONS:
       strategy_sums[action] += strategy[action]
@@ -661,6 +699,7 @@ class LearnableCFRPlayer(BasePokerPlayer):
         decision["chosen_action"],
         decision["baseline_action"],
         visit_count,
+        decision["context"]["opponent"],
     )
     node_value = sum(decision["strategy"][action] * utilities[action] for action in ACTIONS)
     for action in decision["legal_actions"]:
@@ -674,6 +713,7 @@ class LearnableCFRPlayer(BasePokerPlayer):
       chosen_action,
       baseline_action,
       visit_count,
+      opponent_name,
   ):
     strength = features["strength"]
     pot_odds = features["pot_odds"]
@@ -701,16 +741,105 @@ class LearnableCFRPlayer(BasePokerPlayer):
     if baseline_action in legal_actions:
       utilities[baseline_action] += assist
 
+    exploit_bonus = self._rule_based_bonus(features, opponent_name)
+    if opponent_name in {"threshold", "condition_threshold"}:
+      utilities["raise"] += exploit_bonus["raise"]
+      utilities["call"] += exploit_bonus["call"]
+      utilities["fold"] += exploit_bonus["fold"]
+
     for action in ACTIONS:
       if action not in legal_actions:
         utilities[action] = 0.0
     return utilities
+
+  def _rule_based_bonus(self, features, opponent_name):
+    bonus = self._zero_action_map()
+    if opponent_name not in {"threshold", "condition_threshold"}:
+      return bonus
+
+    pressure = features["pressure"]
+    strength = features["strength"]
+    draws = features["draws"]
+    street = features["street"]
+    position = 1 if features["position"] else 0
+    history = features["history"]
+
+    if pressure <= 0.10 and position and history in {0, 1, 6}:
+      bonus["raise"] += 0.08
+    if street in {"flop", "turn"} and draws >= 2 and pressure <= 0.18:
+      bonus["raise"] += 0.05
+      bonus["call"] += 0.02
+    if strength >= 0.70 and pressure <= 0.25:
+      bonus["raise"] += 0.06
+    if pressure >= 0.30 and strength < 0.52:
+      bonus["fold"] += 0.06
+    return bonus
+
+  def _exploit_bucket(self, opponent_name, features):
+    opponent_key = (
+        "rule_based"
+        if opponent_name in {"threshold", "condition_threshold"}
+        else "self_like"
+        if opponent_name == "fixed_self"
+        else "other"
+    )
+    pressure_bucket = min(3, int(features["pressure"] * 4.0))
+    strength_bucket = min(3, int(features["strength"] * 4.0))
+    history_bucket = min(3, int(features["history"] // 2))
+    return "|".join(
+        [
+            opponent_key,
+            features["street"],
+            str(pressure_bucket),
+            str(strength_bucket),
+            str(history_bucket),
+        ]
+    )
+
+  def _apply_exploit_bias(self, info_key, strategy, legal_actions, features, opponent_name):
+    bucket = self._exploit_bucket(opponent_name, features)
+    bias_map = self.exploit_bias.get(bucket)
+    if not bias_map:
+      return dict(strategy)
+    adjusted = {}
+    total = 0.0
+    for action in ACTIONS:
+      if action not in legal_actions:
+        adjusted[action] = 0.0
+        continue
+      value = strategy.get(action, 0.0) + self.exploit_strength * bias_map.get(action, 0.0)
+      value = max(0.0, value)
+      adjusted[action] = value
+      total += value
+    if total <= 0:
+      return dict(strategy)
+    for action in ACTIONS:
+      if action in legal_actions:
+        adjusted[action] /= total
+    return adjusted
+
+  def _update_exploit_bias(self, decision, round_reward):
+    opponent_name = decision["context"]["opponent"]
+    bucket = self._exploit_bucket(opponent_name, decision["features"])
+    bias_map = self.exploit_bias.setdefault(bucket, self._zero_action_map())
+    legal_actions = decision["legal_actions"]
+    chosen_action = decision["chosen_action"]
+    if chosen_action in legal_actions:
+      bias_map[chosen_action] += self.exploit_update_rate * round_reward
+    baseline_action = decision["baseline_action"]
+    if opponent_name in {"threshold", "condition_threshold"} and baseline_action in legal_actions:
+      bias_map[baseline_action] += 0.35 * self.exploit_update_rate * round_reward
+    for action in ACTIONS:
+      bias_map[action] = max(-1.5, min(1.5, bias_map[action]))
 
   def _discount_tables(self):
     for table in (self.regret_sum, self.strategy_sum):
       for info_key, action_map in table.items():
         for action in ACTIONS:
           action_map[action] *= self.discount_factor
+    for bucket, action_map in self.exploit_bias.items():
+      for action in ACTIONS:
+        action_map[action] *= max(self.discount_factor, 0.97)
 
   def _zero_action_map(self):
     return {action: 0.0 for action in ACTIONS}
