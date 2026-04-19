@@ -57,7 +57,7 @@ from lucas_agents.learnable_agent_v0.learnable_cfr_player import (
     DEFAULT_POLICY_PATH,
     LearnableCFRPlayer,
 )
-from lucas_agents.learnable_agent_v0.random_player_wrapper import setup_ai as setup_random_ai
+from lucas_agents.condition_threshold_player import ConditionThresholdPlayer
 from lucas_agents.learnable_agent_v0.threshold_based_player import ThresholdBasedPlayer
 
 
@@ -78,11 +78,11 @@ DEFAULT_MATCH_RETRIES = 2
 DEFAULT_EVAL_INTERVAL = 50
 DEFAULT_EVAL_GAMES = 30
 OPPONENT_WEIGHTS = {
-    "threshold": 0.50,
-    "fixed_self": 0.40,
-    "random": 0.10,
+    "threshold": 0.35,
+    "condition_threshold": 0.35,
+    "fixed_self": 0.30,
 }
-EVAL_OPPONENTS = ("threshold", "random")
+EVAL_OPPONENTS = ("threshold", "condition_threshold", "fixed_self")
 PLOTS_DIR = os.path.join(os.path.dirname(__file__), "training_plots")
 
 
@@ -116,8 +116,8 @@ def build_opponent(name):
     return FixedPolicyLearnablePlayer(policy_path=DEFAULT_FIXED_POLICY_PATH)
   if name == "threshold":
     return ThresholdBasedPlayer()
-  if name == "random":
-    return setup_random_ai()
+  if name == "condition_threshold":
+    return ConditionThresholdPlayer()
   raise ValueError(f"Unsupported opponent: {name}")
 
 
@@ -199,6 +199,8 @@ def _update_plot_history(history, game_index, learner, eval_summary=None):
   if eval_summary is not None:
     history["eval_overall_win_rate"].append(eval_summary["overall_win_rate"])
     for opponent_name, win_rate in eval_summary["by_opponent"].items():
+      if win_rate is None:
+        continue
       history["eval_opponents"][opponent_name]["games"].append(game_index)
       history["eval_opponents"][opponent_name]["win_rate"].append(win_rate)
 
@@ -312,7 +314,7 @@ def run_checkpoint_eval(args, learner, game_index):
       if learner_stack > opponent_stack:
         wins += 1
         total_wins += 1
-    by_opponent[opponent_name] = 0.0 if matches == 0 else wins / matches
+    by_opponent[opponent_name] = None if matches == 0 else wins / matches
   summary = {
       "game_index": game_index,
       "overall_win_rate": 0.0 if total_matches == 0 else total_wins / total_matches,
@@ -321,7 +323,8 @@ def run_checkpoint_eval(args, learner, game_index):
   print(
       f"checkpoint_eval game={game_index} overall_win_rate={summary['overall_win_rate']:.4f} "
       + " ".join(
-          f"{name}_win_rate={rate:.4f}" for name, rate in by_opponent.items()
+          f"{name}_win_rate={rate:.4f}" if rate is not None else f"{name}_win_rate=skipped"
+          for name, rate in by_opponent.items()
       )
   )
   return summary
