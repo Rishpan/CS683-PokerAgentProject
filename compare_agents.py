@@ -6,16 +6,19 @@ python3 compare_agents.py lucas_agents/condition_threshold_player.py raise_playe
 """
 import argparse
 import importlib.util
+import multiprocessing
 import sys
+import time
 from pathlib import Path
 
 from pypokerengine.api.game import setup_config, start_poker
 
 
-DEFAULT_GAMES = 100
-DEFAULT_STACK = 500
+DEFAULT_GAMES = 200
+DEFAULT_STACK = 1000
 DEFAULT_BLIND = 10
 DEFAULT_MAX_ROUND = 100
+DEFAULT_WORKERS = 4
 
 
 def load_player(script_path, module_name):
@@ -45,8 +48,8 @@ def run_match(player_a_path, player_b_path, max_round, initial_stack, small_blin
     return players
 
 
-def compare(player_a_path, player_b_path, games, max_round, initial_stack, small_blind):
-    summary = {
+def create_summary(player_a_path, player_b_path):
+    return {
         "player_a": {
             "label": "Player A (%s)" % Path(player_a_path).name,
             "wins": 0,
@@ -61,7 +64,11 @@ def compare(player_a_path, player_b_path, games, max_round, initial_stack, small
         },
     }
 
-    for game_index in range(games):
+
+def run_matches_batch(player_a_path, player_b_path, games, max_round, initial_stack, small_blind):
+    summary = create_summary(player_a_path, player_b_path)
+
+    for _ in range(games):
         players = run_match(player_a_path, player_b_path, max_round, initial_stack, small_blind)
         top_stack = players[0]["stack"]
         winners = [player for player in players if player["stack"] == top_stack]
@@ -75,9 +82,143 @@ def compare(player_a_path, player_b_path, games, max_round, initial_stack, small
             for winner in winners:
                 summary[winner["name"]]["ties"] += 1
 
-        print_progress(game_index + 1, games)
+    return summary
+
+
+def run_matches_batch_with_progress(
+    player_a_path,
+    player_b_path,
+    games,
+    max_round,
+    initial_stack,
+    small_blind,
+    progress_counter,
+):
+    summary = create_summary(player_a_path, player_b_path)
+
+    for _ in range(games):
+        players = run_match(player_a_path, player_b_path, max_round, initial_stack, small_blind)
+        top_stack = players[0]["stack"]
+        winners = [player for player in players if player["stack"] == top_stack]
+
+        for player in players:
+            summary[player["name"]]["total_stack"] += player["stack"]
+
+        if len(winners) == 1:
+            summary[winners[0]["name"]]["wins"] += 1
+        else:
+            for winner in winners:
+                summary[winner["name"]]["ties"] += 1
+
+        with progress_counter.get_lock():
+            progress_counter.value += 1
 
     return summary
+
+
+def merge_summary(summary, partial_summary):
+    for player_name, stats in partial_summary.items():
+        summary[player_name]["wins"] += stats["wins"]
+        summary[player_name]["ties"] += stats["ties"]
+        summary[player_name]["total_stack"] += stats["total_stack"]
+
+
+def split_games(total_games, workers):
+    worker_count = max(1, min(workers, total_games))
+    base_games, extra_games = divmod(total_games, worker_count)
+    return [base_games + (1 if index < extra_games else 0) for index in range(worker_count)]
+
+
+def worker_run_matches_batch(
+    conn,
+    player_a_path,
+    player_b_path,
+    games,
+    max_round,
+    initial_stack,
+    small_blind,
+    progress_counter,
+):
+    try:
+        conn.send(
+            run_matches_batch_with_progress(
+                player_a_path,
+                player_b_path,
+                games,
+                max_round,
+                initial_stack,
+                small_blind,
+                progress_counter,
+            )
+        )
+    finally:
+        conn.close()
+
+
+def compare_with_processes(player_a_path, player_b_path, game_batches, max_round, initial_stack, small_blind, games):
+    summary = create_summary(player_a_path, player_b_path)
+    context = multiprocessing.get_context("fork")
+    progress_counter = context.Value("i", 0)
+    workers = []
+    last_reported_progress = -1
+
+    for batch_games in game_batches:
+        parent_conn, child_conn = context.Pipe(duplex=False)
+        process = context.Process(
+            target=worker_run_matches_batch,
+            args=(
+                child_conn,
+                player_a_path,
+                player_b_path,
+                batch_games,
+                max_round,
+                initial_stack,
+                small_blind,
+                progress_counter,
+            ),
+        )
+        process.start()
+        child_conn.close()
+        workers.append((process, parent_conn, batch_games))
+
+    while True:
+        with progress_counter.get_lock():
+            completed_games = progress_counter.value
+        if completed_games != last_reported_progress:
+            print_progress(completed_games, games)
+            last_reported_progress = completed_games
+        if completed_games >= games:
+            break
+        if not any(process.is_alive() for process, _, _ in workers):
+            break
+        time.sleep(0.1)
+
+    for process, parent_conn, batch_games in workers:
+        partial_summary = parent_conn.recv()
+        parent_conn.close()
+        process.join()
+        merge_summary(summary, partial_summary)
+
+    if last_reported_progress != games:
+        print_progress(games, games)
+
+    return summary
+
+
+def compare(player_a_path, player_b_path, games, max_round, initial_stack, small_blind, workers):
+    if games <= 0:
+        return create_summary(player_a_path, player_b_path)
+
+    game_batches = split_games(games, workers)
+    return compare_with_processes(
+        player_a_path,
+        player_b_path,
+        game_batches,
+        max_round,
+        initial_stack,
+        small_blind,
+        games,
+    )
 
 
 def print_progress(current, total, width=30):
@@ -110,6 +251,7 @@ def main():
     parser.add_argument("--max-round", type=int, default=DEFAULT_MAX_ROUND)
     parser.add_argument("--initial-stack", type=int, default=DEFAULT_STACK)
     parser.add_argument("--small-blind", type=int, default=DEFAULT_BLIND)
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     args = parser.parse_args()
 
     summary = compare(
@@ -119,6 +261,7 @@ def main():
         args.max_round,
         args.initial_stack,
         args.small_blind,
+        args.workers,
     )
     print_summary(summary, args.games, args.max_round, args.initial_stack, args.small_blind)
 
