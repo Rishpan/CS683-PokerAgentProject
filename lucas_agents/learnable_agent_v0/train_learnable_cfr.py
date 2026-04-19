@@ -58,19 +58,17 @@ DEFAULT_MIN_USE_STRATEGY_VISITS = 8
 DEFAULT_RANDOM_SEED = 7
 DEFAULT_MATCH_RETRIES = 2
 DEFAULT_EVAL_INTERVAL = 50
-DEFAULT_EVAL_GAMES = 30
+DEFAULT_EVAL_GAMES = 200
 STAGE_A_END = 200
 STAGE_A_WEIGHTS = {
-    "threshold": 0.35,
-    "condition_threshold": 0.35,
-    "fixed_self": 0.30,
+    "threshold": 0.90,
+    "fixed_self": 0.10,
 }
 STAGE_B_WEIGHTS = {
-    "threshold": 0.40,
-    "condition_threshold": 0.40,
-    "fixed_self": 0.20,
+    "threshold": 0.90,
+    "fixed_self": 0.10,
 }
-EVAL_OPPONENTS = ("threshold", "condition_threshold", "fixed_self")
+EVAL_OPPONENTS = ("threshold", "fixed_self")
 PLOTS_DIR = os.path.join(os.path.dirname(__file__), "training_plots")
 BEST_THRESHOLD_PATH = os.path.join(os.path.dirname(__file__), "best_vs_threshold_policy.json")
 BEST_CONDITION_PATH = os.path.join(os.path.dirname(__file__), "best_vs_condition_threshold_policy.json")
@@ -111,8 +109,6 @@ def build_opponent(name):
     return FixedPolicyLearnablePlayer(policy_path=DEFAULT_FIXED_POLICY_PATH)
   if name == "threshold":
     return ThresholdBasedPlayer()
-  if name == "condition_threshold":
-    return ConditionThresholdPlayer()
   raise ValueError(f"Unsupported opponent: {name}")
 
 
@@ -335,9 +331,8 @@ def maybe_save_best_checkpoints(eval_summary):
 
   threshold_score = eval_summary["by_opponent"].get("threshold")
   condition_score = eval_summary["by_opponent"].get("condition_threshold")
-  robust_score = min(
-      score for score in [threshold_score, condition_score] if score is not None
-  ) if any(score is not None for score in [threshold_score, condition_score]) else None
+  robust_inputs = [score for score in [threshold_score, condition_score] if score is not None]
+  robust_score = min(robust_inputs) if robust_inputs else None
 
   changed = False
   if threshold_score is not None and threshold_score > payload["best_vs_threshold"]["score"]:
