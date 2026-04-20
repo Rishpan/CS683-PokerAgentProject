@@ -52,6 +52,8 @@ def main():
     for attempt in range(1, args.max_retries + 2):
       try:
         opponent = _build_opponent(opponent_name, args.policy_path)
+        _prepare_player_for_match(learner)
+        _prepare_player_for_match(opponent)
         result = _play_match(
             learner=learner,
             opponent=opponent,
@@ -68,7 +70,7 @@ def main():
         print()
         print(error_text)
         print(traceback.format_exc())
-        learner.cfr.round_decisions = []
+        _recover_from_failed_match(learner, game_index, attempt)
         if attempt > args.max_retries:
           skipped += 1
           break
@@ -145,6 +147,17 @@ def _play_match(learner, opponent, learner_seat, max_round, initial_stack, small
     config.register_player(name="player_a", algorithm=opponent)
     config.register_player(name="player_b", algorithm=learner)
   return start_poker(config, verbose=verbose)
+
+
+def _prepare_player_for_match(player):
+  if hasattr(player, "reset_match_state"):
+    player.reset_match_state()
+
+
+def _recover_from_failed_match(learner, game_index, attempt):
+  learner.reset_match_state()
+  learner.save_policy()
+  print(f"recovered_from_error game={game_index} attempt={attempt} checkpoint_saved=1")
 
 
 class TrainingLearnableAdversarialSearchPlayerV2(LearnableAdversarialSearchPlayerV2):
