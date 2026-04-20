@@ -13,6 +13,8 @@ from pypokerengine.api.game import setup_config, start_poker
 from lucas_agents.learnable_adversarial_search_agent_v2.cfr import DEFAULT_POLICY_PATH
 from lucas_agents.learnable_adversarial_search_agent_v2.player import LearnableAdversarialSearchPlayerV2
 from lucas_agents.learnable_agent_v0.threshold_based_player import ThresholdBasedPlayer
+from lucas_agents.learnable_agent_v0.random_player_wrapper import setup_ai as setup_random_player
+from lucas_agents.advanced_cfr.advanced_cfr_player import AdvancedCFRPlayer
 
 
 def parse_args():
@@ -24,6 +26,8 @@ def parse_args():
   parser.add_argument("--initial-stack", type=int, default=500)
   parser.add_argument("--small-blind", type=int, default=10)
   parser.add_argument("--self-play-ratio", type=float, default=0.5)
+  parser.add_argument("--opponents", default="self,threshold")
+  parser.add_argument("--exploration", type=float, default=0.06)
   parser.add_argument("--max-retries", type=int, default=2)
   parser.add_argument("--verbose", action="store_true")
   return parser.parse_args()
@@ -35,16 +39,18 @@ def main():
       policy_path=args.policy_path,
       training_enabled=True,
       use_search=False,
+      exploration=args.exploration,
       save_interval=args.save_interval,
   )
 
-  wins = {"self": 0, "threshold": 0}
-  matches = {"self": 0, "threshold": 0}
+  opponent_pool = _parse_opponents(args.opponents)
+  wins = {name: 0 for name in opponent_pool}
+  matches = {name: 0 for name in opponent_pool}
   skipped = 0
   start_time = time.time()
 
   for game_index in range(1, args.games + 1):
-    opponent_name = _choose_opponent(game_index, args.self_play_ratio)
+    opponent_name = _choose_opponent(game_index, args.self_play_ratio, opponent_pool)
     learner_seat = "player_a" if game_index % 2 else "player_b"
     result = None
     error_text = None
@@ -86,8 +92,7 @@ def main():
       print()
       print(
           f"checkpoint game={game_index} states={len(learner.cfr.state_visits)}/{learner.TOTAL_ABSTRACT_STATES} "
-          f"wins_self={wins['self']}/{max(matches['self'], 1)} "
-          f"wins_threshold={wins['threshold']}/{max(matches['threshold'], 1)} "
+          f"results={_format_results_summary(wins, matches)} "
           f"skipped={skipped}"
       )
 
@@ -105,13 +110,37 @@ def _build_opponent(name, policy_path):
     )
   if name == "threshold":
     return ThresholdBasedPlayer()
+  if name == "random":
+    return setup_random_player()
+  if name == "advanced_cfr":
+    return AdvancedCFRPlayer(training_enabled=False, exploration=0.0)
   raise ValueError(f"Unsupported opponent {name}")
 
 
-def _choose_opponent(game_index, self_play_ratio):
-  prior_self = int(round((game_index - 1) * self_play_ratio))
-  current_self = int(round(game_index * self_play_ratio))
-  return "self" if current_self > prior_self else "threshold"
+def _parse_opponents(raw_value):
+  supported = {"self", "threshold", "random", "advanced_cfr"}
+  opponents = [name.strip() for name in raw_value.split(",") if name.strip()]
+  if not opponents:
+    raise ValueError("At least one opponent must be configured")
+  invalid = [name for name in opponents if name not in supported]
+  if invalid:
+    raise ValueError(f"Unsupported opponents: {', '.join(invalid)}")
+  return opponents
+
+
+def _choose_opponent(game_index, self_play_ratio, opponent_pool):
+  if opponent_pool == ["self", "threshold"]:
+    prior_self = int(round((game_index - 1) * self_play_ratio))
+    current_self = int(round(game_index * self_play_ratio))
+    return "self" if current_self > prior_self else "threshold"
+  return opponent_pool[(game_index - 1) % len(opponent_pool)]
+
+
+def _format_results_summary(wins, matches):
+  parts = []
+  for name in matches:
+    parts.append(f"{name}={wins[name]}/{matches[name]}")
+  return " ".join(parts)
 
 
 def _print_progress(game_index, total_games, start_time, learner, opponent_name, wins, matches, skipped):
@@ -126,8 +155,7 @@ def _print_progress(game_index, total_games, start_time, learner, opponent_name,
       f"\r[{bar}] {game_index}/{total_games} "
       f"opp={opponent_name:<9} "
       f"coverage={coverage:5.1f}% "
-      f"self={wins['self']}/{matches['self']} "
-      f"threshold={wins['threshold']}/{matches['threshold']} "
+      f"{_format_results_summary(wins, matches)} "
       f"skipped={skipped} "
       f"eta={eta:5.1f}s"
   )
