@@ -10,8 +10,8 @@ if PROJECT_ROOT not in sys.path:
 
 from pypokerengine.api.game import setup_config, start_poker
 
-from lucas_agents.learnable_adversarial_search_agent_v2.cfr import DEFAULT_POLICY_PATH
-from lucas_agents.learnable_adversarial_search_agent_v2.player import LearnableAdversarialSearchPlayerV2
+from lucas_agents.learnable_adversarial_search_agent_v3.cfr import DEFAULT_POLICY_PATH
+from lucas_agents.learnable_adversarial_search_agent_v3.player import LearnableAdversarialSearchPlayerV3
 from lucas_agents.learnable_agent_v0.threshold_based_player import ThresholdBasedPlayer
 from lucas_agents.learnable_agent_v0.random_player_wrapper import setup_ai as setup_random_player
 from lucas_agents.advanced_cfr.advanced_cfr_player import AdvancedCFRPlayer
@@ -35,7 +35,7 @@ def parse_args():
 
 def main():
   args = parse_args()
-  learner = TrainingLearnableAdversarialSearchPlayerV2(
+  learner = TrainingLearnableAdversarialSearchPlayerV3(
       policy_path=args.policy_path,
       training_enabled=True,
       use_search=False,
@@ -108,7 +108,7 @@ def main():
 
 def _build_opponent(name, policy_path):
   if name == "self":
-    return LearnableAdversarialSearchPlayerV2(
+    return LearnableAdversarialSearchPlayerV3(
         policy_path=policy_path,
         training_enabled=False,
         use_search=False,
@@ -196,7 +196,7 @@ def _recover_from_failed_match(learner, game_index, attempt):
   print(f"recovered_from_error game={game_index} attempt={attempt} checkpoint_saved=1")
 
 
-class TrainingLearnableAdversarialSearchPlayerV2(LearnableAdversarialSearchPlayerV2):
+class TrainingLearnableAdversarialSearchPlayerV3(LearnableAdversarialSearchPlayerV3):
 
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
