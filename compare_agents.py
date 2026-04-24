@@ -19,7 +19,7 @@ BASELINE_SUITE_GAMES = 300
 DEFAULT_STACK = 1000
 DEFAULT_BLIND = 10
 DEFAULT_MAX_ROUND = 100
-DEFAULT_WORKERS = 4
+DEFAULT_WORKERS = 1
 BASELINE_OPPONENTS = (
     "raise_player.py",
     "lucas_agents/condition_threshold_player.py",

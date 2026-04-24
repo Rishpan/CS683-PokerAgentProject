@@ -12,6 +12,7 @@ import os
 import random
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -34,14 +35,15 @@ from pypokerengine.api.emulator import Emulator
 from pypokerengine.api.game import setup_config, start_poker
 from pypokerengine.engine.action_checker import ActionChecker
 from pypokerengine.engine.data_encoder import DataEncoder
+from pypokerengine.engine.poker_constants import PokerConstants as Const
 from pypokerengine.engine.round_manager import RoundManager
 from pypokerengine.players import BasePokerPlayer
-from pypokerengine.utils.game_state_utils import deepcopy_game_state
 
 from mccfr_abstraction_loader import (
     abstraction_identity,
     abstraction_is_compatible,
     load_abstraction,
+    observe_opponent_action_stats,
     resolve_policy_abstraction_ref,
 )
 from mccfr_config import (
@@ -53,10 +55,13 @@ from mccfr_config import (
     DEFAULT_POSTFLOP_SIMULATIONS,
     DEFAULT_SMALL_BLIND,
     DEFAULT_ABSTRACTION_REF,
-    LEGACY_POLICY_PATHS,
+
 )
 from mccfr_player import MCCFRPlayer
 from mccfr_tables import ACTIONS, StrategyTable
+
+SELF_PLAY_OPPONENT = "self"
+RAISE_PLAYER_OPPONENT = "raise_player"
 
 
 class ExternalSamplingMCCFRTrainer:
@@ -79,16 +84,19 @@ class ExternalSamplingMCCFRTrainer:
       postflop_simulations=64,
       reset_policy=False,
       abstraction=None,
+      opponent_pool=None,
   ):
     self.iterations = iterations
     self.initial_stack = initial_stack
     self.small_blind = small_blind
     self.max_rounds = max_rounds
-    self.policy_path = self._resolve_policy_path(policy_path or DEFAULT_POLICY_PATH)
+    self.policy_path = policy_path or DEFAULT_POLICY_PATH
     self.checkpoint_interval = max(1, checkpoint_interval)
     self.log_interval = max(1, log_interval)
     self.postflop_simulations = postflop_simulations
     self.random = random.Random(random_seed)
+    self.opponent_pool = self._normalize_opponent_pool(opponent_pool)
+    self.training_mode = self._training_mode_label()
     self.tables, self.metadata = StrategyTable.load(self.policy_path)
     self.abstraction_ref = resolve_policy_abstraction_ref(
         self.metadata,
@@ -124,6 +132,9 @@ class ExternalSamplingMCCFRTrainer:
             "postflop_simulations": postflop_simulations,
             "initial_stack": initial_stack,
             "small_blind": small_blind,
+            "max_rounds": max_rounds,
+            "training_mode": self.training_mode,
+            "training_opponents": [spec["label"] for spec in self.opponent_pool],
         }
     )
     self.emulator = Emulator()
@@ -138,15 +149,29 @@ class ExternalSamplingMCCFRTrainer:
         "p1": {"name": "mccfr_p1", "stack": initial_stack},
     }
     self.episode_count = 0
+    self.trained_round_count = 0
     self.start_time = None
 
   def train(self, eval_every=0, eval_games=0, verbose=False):
     self.start_time = time.time()
     for iteration in range(1, self.iterations + 1):
-      round_state = self._new_round_root(iteration)
-      for traverser in self.players_info.keys():
-        start_stack = self._stack_by_uuid(round_state, traverser)
-        self._traverse(round_state, traverser, start_stack)
+      game_state = self._new_episode_game_state(iteration)
+      for round_index in range(self.max_rounds):
+        round_state, _ = self.emulator.start_new_round(game_state)
+        if self._is_round_finished(round_state) or self._active_stack_count(round_state) <= 1:
+          break
+
+        self.trained_round_count += 1
+        for traverser in self.players_info.keys():
+          start_stack = self._stack_by_uuid(round_state, traverser)
+          opponent_spec = self._sample_opponent_spec()
+          self._traverse(round_state, traverser, start_stack, opponent_spec)
+
+        if round_index == self.max_rounds - 1:
+          break
+        game_state = self._sample_round_to_finish(round_state, self._sample_opponent_spec())
+        if self._active_stack_count(game_state) <= 1:
+          break
       self.episode_count += 1
 
       if verbose and self._should_log(iteration):
@@ -163,6 +188,7 @@ class ExternalSamplingMCCFRTrainer:
 
   def save_policy(self):
     self.metadata["episodes"] = self.episode_count
+    self.metadata["trained_rounds"] = self.trained_round_count
     abstraction_cap = self.abstraction.abstraction_state_upper_bound()
     visited_state_count = self._visited_state_count()
     self.metadata["visited_states"] = visited_state_count
@@ -173,20 +199,19 @@ class ExternalSamplingMCCFRTrainer:
     self.tables.save(self.policy_path, metadata=self.metadata)
 
   def _new_round_root(self, iteration):
-    game_state = self.emulator.generate_initial_game_state(self.players_info)
-    desired_dealer = iteration % 2
-    game_state["table"].dealer_btn = (desired_dealer - 1) % len(self.players_info)
+    game_state = self._new_episode_game_state(iteration)
     round_state, _ = self.emulator.start_new_round(game_state)
     return round_state
 
-  def _resolve_policy_path(self, policy_path):
-    if policy_path == DEFAULT_POLICY_PATH and not os.path.exists(policy_path):
-      for legacy_path in LEGACY_POLICY_PATHS:
-        if os.path.exists(legacy_path):
-          return legacy_path
-    return policy_path
+  def _new_episode_game_state(self, iteration):
+    game_state = self.emulator.generate_initial_game_state(self.players_info)
+    desired_dealer = iteration % len(self.players_info)
+    game_state["table"].dealer_btn = (desired_dealer - 1) % len(self.players_info)
+    return game_state
 
-  def _traverse(self, game_state, traverser_uuid, start_stack):
+
+
+  def _traverse(self, game_state, traverser_uuid, start_stack, opponent_spec):
     if self._is_terminal(game_state):
       final_stack = self._stack_by_uuid(game_state, traverser_uuid)
       scale = max(self.small_blind * 2, 1)
@@ -195,18 +220,18 @@ class ExternalSamplingMCCFRTrainer:
     round_state = DataEncoder.encode_round_state(game_state)
     current_uuid = self._current_player_uuid(game_state)
     hole_card = self._hole_cards(game_state, current_uuid)
-    legal_actions = {
-        entry["action"]
-        for entry in ActionChecker.legal_actions(
-            game_state["table"].seats.players,
-            game_state["next_player"],
-            game_state["small_blind_amount"],
-            game_state["street"],
-        )
-    }
-    opponent_stats = self.abstraction.observe_opponent_actions(
+    valid_actions = ActionChecker.legal_actions(
+        game_state["table"].seats.players,
+        game_state["next_player"],
+        game_state["small_blind_amount"],
+        game_state["street"],
+    )
+    legal_actions = {entry["action"] for entry in valid_actions}
+    opponent_stats = observe_opponent_action_stats(
+        self.abstraction,
         round_state["action_histories"],
         current_uuid,
+        historical_action_stats=None,
     )
     info_key, _ = self.abstraction.build_info_key(
         hole_card=hole_card,
@@ -218,23 +243,75 @@ class ExternalSamplingMCCFRTrainer:
     strategy = self.tables.legal_strategy(info_key, legal_actions)
 
     if current_uuid == traverser_uuid:
+      if opponent_spec["kind"] != SELF_PLAY_OPPONENT:
+        # Against fixed scripted opponents there is no second learner copy to
+        # accumulate the average strategy on opponent nodes, so record the
+        # learner's realized strategy directly on its own infosets.
+        self.tables.accumulate_average(info_key, strategy, weight=1.0)
       action_values = {}
       node_value = 0.0
       for action in legal_actions:
         next_state = self._apply_action(game_state, action)
-        action_values[action] = self._traverse(next_state, traverser_uuid, start_stack)
+        action_values[action] = self._traverse(
+            next_state,
+            traverser_uuid,
+            start_stack,
+            opponent_spec,
+        )
         node_value += strategy[action] * action_values[action]
       self.tables.apply_regret_update(info_key, action_values, node_value, legal_actions)
       return node_value
 
-    sampled_action = self._sample_action(strategy, legal_actions)
-    self.tables.accumulate_average(info_key, strategy, weight=1.0)
+    if opponent_spec["kind"] == SELF_PLAY_OPPONENT:
+      sampled_action = self._sample_action(strategy, legal_actions)
+      self.tables.accumulate_average(info_key, strategy, weight=1.0)
+    else:
+      sampled_action = self._raise_player_action(valid_actions)
     next_state = self._apply_action(game_state, sampled_action)
-    return self._traverse(next_state, traverser_uuid, start_stack)
+    return self._traverse(next_state, traverser_uuid, start_stack, opponent_spec)
 
   def _apply_action(self, game_state, action):
-    next_state, _ = RoundManager.apply_action(deepcopy_game_state(game_state), action)
+    next_state, _ = RoundManager.apply_action(game_state, action)
     return next_state
+
+  def _sample_round_to_finish(self, game_state, opponent_spec):
+    sampled_state = game_state
+    while not self._is_round_finished(sampled_state):
+      if self._active_stack_count(sampled_state) <= 1:
+        break
+      sampled_action = self._sample_transition_action(sampled_state, opponent_spec)
+      sampled_state = self._apply_action(sampled_state, sampled_action)
+    return sampled_state
+
+  def _sample_transition_action(self, game_state, opponent_spec):
+    valid_actions = ActionChecker.legal_actions(
+        game_state["table"].seats.players,
+        game_state["next_player"],
+        game_state["small_blind_amount"],
+        game_state["street"],
+    )
+    current_uuid = self._current_player_uuid(game_state)
+    if opponent_spec["kind"] != SELF_PLAY_OPPONENT and current_uuid == "p1":
+      return self._raise_player_action(valid_actions)
+
+    legal_actions = {entry["action"] for entry in valid_actions}
+    round_state = DataEncoder.encode_round_state(game_state)
+    hole_card = self._hole_cards(game_state, current_uuid)
+    opponent_stats = observe_opponent_action_stats(
+        self.abstraction,
+        round_state["action_histories"],
+        current_uuid,
+        historical_action_stats=None,
+    )
+    info_key, _ = self.abstraction.build_info_key(
+        hole_card=hole_card,
+        round_state=round_state,
+        player_uuid=current_uuid,
+        opponent_action_stats=opponent_stats,
+        postflop_simulations=self.postflop_simulations,
+    )
+    strategy = self.tables.legal_strategy(info_key, legal_actions)
+    return self._sample_action(strategy, legal_actions)
 
   def _current_player_uuid(self, game_state):
     next_player = game_state["next_player"]
@@ -249,7 +326,13 @@ class ExternalSamplingMCCFRTrainer:
     return player.stack
 
   def _is_terminal(self, game_state):
-    return game_state["street"] == 5
+    return self._is_round_finished(game_state)
+
+  def _is_round_finished(self, game_state):
+    return game_state["street"] == Const.Street.FINISHED
+
+  def _active_stack_count(self, game_state):
+    return sum(1 for player in game_state["table"].seats.players if player.stack > 0)
 
   def _sample_action(self, strategy, legal_actions):
     draw = self.random.random()
@@ -263,6 +346,14 @@ class ExternalSamplingMCCFRTrainer:
       if draw <= cumulative:
         return action
     return fallback
+
+  def _raise_player_action(self, valid_actions):
+    for entry in valid_actions:
+      if entry["action"] == "raise":
+        return "raise"
+    if any(entry["action"] == "call" for entry in valid_actions):
+      return "call"
+    return "fold"
 
   def _evaluate(self, games):
     random_result = play_match(self.policy_path, os.path.join(PROJECT_ROOT, "randomplayer.py"), games)
@@ -299,8 +390,48 @@ class ExternalSamplingMCCFRTrainer:
   def _visited_state_count(self):
     return len(set(self.tables.regret_sum) | set(self.tables.strategy_sum))
 
+  def _normalize_opponent_pool(self, opponent_pool):
+    if not opponent_pool:
+      return [{"kind": SELF_PLAY_OPPONENT, "label": SELF_PLAY_OPPONENT}]
 
-def load_agent_from_script(script_path):
+    specs = []
+    for entry in opponent_pool:
+      candidate = str(entry).strip()
+      if not candidate:
+        continue
+      normalized = candidate.lower()
+      if normalized in ("self", "self-play", "self_play"):
+        specs.append({"kind": SELF_PLAY_OPPONENT, "label": SELF_PLAY_OPPONENT})
+        continue
+      if normalized in ("raise", "raise_player", "raise-player", "raise_player.py"):
+        specs.append({"kind": RAISE_PLAYER_OPPONENT, "label": RAISE_PLAYER_OPPONENT})
+        continue
+      candidate_path = os.path.basename(candidate).lower()
+      if candidate_path == "raise_player.py":
+        specs.append({"kind": RAISE_PLAYER_OPPONENT, "label": RAISE_PLAYER_OPPONENT})
+        continue
+      raise ValueError(
+          "Unsupported training opponent. Use 'self', 'raise_player', or a comma-separated mix."
+      )
+
+    if not specs:
+      raise ValueError("Opponent pool is empty. Use 'self', 'raise_player', or both.")
+    return specs
+
+  def _training_mode_label(self):
+    kinds = {spec["kind"] for spec in self.opponent_pool}
+    if kinds == {SELF_PLAY_OPPONENT}:
+      return "self_play"
+    if SELF_PLAY_OPPONENT in kinds:
+      return "mixed"
+    return RAISE_PLAYER_OPPONENT
+
+  def _sample_opponent_spec(self):
+    return self.random.choice(self.opponent_pool)
+
+
+@lru_cache(maxsize=None)
+def _load_agent_setup(script_path):
   module_name = f"mccfr_eval_{abs(hash(script_path))}"
   spec = importlib.util.spec_from_file_location(module_name, script_path)
   if spec is None or spec.loader is None:
@@ -309,7 +440,12 @@ def load_agent_from_script(script_path):
   spec.loader.exec_module(module)
   if not hasattr(module, "setup_ai"):
     raise AttributeError(f"{script_path} is missing setup_ai()")
-  agent = module.setup_ai()
+  return module.setup_ai
+
+
+def load_agent_from_script(script_path):
+  setup_ai = _load_agent_setup(script_path)
+  agent = setup_ai()
   if not isinstance(agent, BasePokerPlayer):
     raise TypeError(f"{script_path} setup_ai() did not return a BasePokerPlayer")
   return agent
@@ -342,8 +478,13 @@ def train_self_play_policy(
     verbose=False,
     reset_policy=False,
     abstraction=None,
+    opponent_pool=None,
 ):
-  """Train a policy through self-play and save it to disk."""
+  """Train a policy and save it to disk.
+
+  By default training is self-play. Pass ``opponent_pool`` to train against
+  ``"raise_player"`` or a mix of ``"self"`` and ``"raise_player"``.
+  """
   trainer = ExternalSamplingMCCFRTrainer(
       iterations=iterations,
       initial_stack=initial_stack,
@@ -356,6 +497,7 @@ def train_self_play_policy(
       postflop_simulations=postflop_simulations,
       reset_policy=reset_policy,
       abstraction=abstraction,
+      opponent_pool=opponent_pool,
   )
   trainer.train(verbose=verbose)
   return trainer
@@ -391,6 +533,14 @@ def parse_args():
           f"default config preset ({DEFAULT_ABSTRACTION_REF}) for a new policy."
       ),
   )
+  parser.add_argument(
+      "--opponents",
+      default=SELF_PLAY_OPPONENT,
+      help=(
+          "Comma-separated training opponent pool. Supported values are "
+          "'self' and 'raise_player'. Example: self,raise_player"
+      ),
+  )
   parser.add_argument("--seed", type=int, default=None)
   parser.add_argument("--postflop-simulations", type=int, default=DEFAULT_POSTFLOP_SIMULATIONS)
   parser.add_argument("--eval-every", type=int, default=0)
@@ -422,11 +572,20 @@ def main():
       postflop_simulations=args.postflop_simulations,
       reset_policy=args.reset_policy,
       abstraction=args.abstraction,
+      opponent_pool=_parse_opponent_pool_arg(args.opponents),
   )
   trainer.train(eval_every=args.eval_every, eval_games=args.eval_games, verbose=not args.quiet)
   print(f"saved_policy={trainer.policy_path}")
   print(f"abstraction={trainer.abstraction_ref}")
+  print(f"training_mode={trainer.training_mode}")
+  print(f"training_opponents={[spec['label'] for spec in trainer.opponent_pool]}")
   print(f"visited_states={trainer._visited_state_count()}")
+
+
+def _parse_opponent_pool_arg(opponents_arg):
+  if opponents_arg is None:
+    return None
+  return [entry.strip() for entry in str(opponents_arg).split(",")]
 
 
 if __name__ == "__main__":

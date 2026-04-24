@@ -2,6 +2,7 @@
 
 import importlib
 import importlib.util
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -141,3 +142,25 @@ def resolve_policy_abstraction_ref(metadata, explicit_abstraction_ref=None):
       return canonicalize_abstraction_ref(saved_ref)
 
   return DEFAULT_ABSTRACTION_REF
+
+
+def observe_opponent_action_stats(
+    module,
+    action_histories,
+    player_uuid,
+    historical_action_stats=None,
+):
+  """Call an abstraction's opponent-summary hook with optional match history."""
+  observe = module.observe_opponent_actions
+  try:
+    parameters = inspect.signature(observe).parameters
+  except (TypeError, ValueError):
+    parameters = {}
+
+  if "historical_action_stats" in parameters:
+    return observe(
+        action_histories,
+        player_uuid,
+        historical_action_stats=historical_action_stats,
+    )
+  return observe(action_histories, player_uuid)

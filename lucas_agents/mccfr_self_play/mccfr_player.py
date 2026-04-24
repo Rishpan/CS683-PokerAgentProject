@@ -17,7 +17,7 @@ from mccfr_abstraction_loader import (
 from mccfr_config import (
     DEFAULT_BOOTSTRAP_ITERATIONS,
     DEFAULT_POLICY_PATH,
-    LEGACY_POLICY_PATHS,
+
 )
 from mccfr_tables import ACTIONS, StrategyTable
 
@@ -30,7 +30,7 @@ class MCCFRPlayer(BasePokerPlayer):
       bootstrap_iterations=DEFAULT_BOOTSTRAP_ITERATIONS,
       abstraction=None,
   ):
-    self.policy_path = self._resolve_policy_path(policy_path or DEFAULT_POLICY_PATH)
+    self.policy_path = policy_path or DEFAULT_POLICY_PATH  
     # print(f"policy_path: {self.policy_path}")
     self.random = random.Random(random_seed)
     self.bootstrap_iterations = bootstrap_iterations
@@ -87,7 +87,8 @@ class MCCFRPlayer(BasePokerPlayer):
     pass
 
   def receive_round_result_message(self, winners, hand_info, round_state):
-    pass
+    del winners, hand_info, round_state
+    self.tables.save_lookup_stats(self.policy_path)
 
   def _sample_action(self, strategy, legal_actions):
     draw = self.random.random()
@@ -112,12 +113,6 @@ class MCCFRPlayer(BasePokerPlayer):
         verbose=False,
     )
 
-  def _resolve_policy_path(self, policy_path):
-    if policy_path == DEFAULT_POLICY_PATH and not os.path.exists(policy_path):
-      for legacy_path in LEGACY_POLICY_PATHS:
-        if os.path.exists(legacy_path):
-          return legacy_path
-    return policy_path
 
 
 def setup_ai():

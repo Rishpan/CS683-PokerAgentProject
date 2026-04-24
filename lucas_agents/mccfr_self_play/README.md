@@ -13,11 +13,12 @@ This package treats the abstraction as part of the policy identity.
 Edit [mccfr_config.py](/Users/xiaofanlu/Documents/github_repos/CS683-PokerAgentProject/lucas_agents/mccfr_self_play/mccfr_config.py:42) and change:
 
 ```python
-DEFAULT_PROFILE_KEY = "rich_hand_strength_v4"
+DEFAULT_PROFILE_KEY = "rich_hand_strength_v5"
 ```
 
 Available presets:
 
+- `rich_hand_strength_v5`
 - `rich_hand_strength_v4`
 - `rich_hand_strength_v3`
 - `bayes_opponent_compact_v1`
@@ -28,21 +29,22 @@ The active preset controls:
 - `DEFAULT_POLICY_PATH`
 - legacy fallback policy paths for that preset
 
-## Current default: rich_hand_strength_v4
+## Current default: rich_hand_strength_v5
 
 Default abstraction:
 
-- file: `abstractions/rich_hand_strength_v4.py`
-- implementation source: `mccfr_abstraction.py`
+- file: `abstractions/rich_hand_strength_v5.py`
 - abstraction name: `rich_hand_strength`
-- abstraction version: `rich_hand_strength_v4`
-- default policy: `policies/mccfr_policy.rich_hand_strength_v4.json`
+- abstraction version: `rich_hand_strength_v5`
+- default policy: `policies/mccfr_policy.rich_hand_strength_v5.json`
 
-`v4` is designed for one-hand MCCFR traces:
+`v5` is designed for one-hand MCCFR traces:
 
 - history is hand-local, not match-local
 - fold endings are ignored because they terminate the hand
-- `pot_odds` and `pressure` are replaced by a single `spr_commitment` bucket
+- explicit `pot_odds` is restored as its own feature
+- `spr_commitment` remains as a separate feature
+- opponent tendency can incorporate prior completed hands in the same match
 - prior-street aggression and current-street raise state are kept as the history signal
 
 Key layout:
@@ -50,6 +52,7 @@ Key layout:
 - `street`
 - `strength`
 - `position`
+- `pot_odds`
 - `spr_commitment`
 - `opponent_tendency`
 - `history`
