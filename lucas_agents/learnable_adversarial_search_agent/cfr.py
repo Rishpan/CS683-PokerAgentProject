@@ -122,7 +122,7 @@ class TabularCFR:
 
   def finish_round(self, terminal_utility):
     if not self.training_enabled:
-      self.round_decisions = []
+      self.reset_round_state()
       return
     # We only observe one sampled terminal history z from the played hand. Since
     # there is no full game-tree traversal available online, the natural update
@@ -135,6 +135,9 @@ class TabularCFR:
     for decision in self.round_decisions:
       prefix_sample_prob *= decision["sample_prob"]
       self._update_regrets(decision, terminal_utility, prefix_sample_prob)
+    self.reset_round_state()
+
+  def reset_round_state(self):
     self.round_decisions = []
 
   def save(self):

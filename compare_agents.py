@@ -15,10 +15,15 @@ from pypokerengine.api.game import setup_config, start_poker
 
 
 DEFAULT_GAMES = 200
+BASELINE_SUITE_GAMES = 300
 DEFAULT_STACK = 1000
 DEFAULT_BLIND = 10
 DEFAULT_MAX_ROUND = 100
 DEFAULT_WORKERS = 4
+BASELINE_OPPONENTS = (
+    "raise_player.py",
+    "lucas_agents/condition_threshold_player.py",
+)
 
 
 def load_player(script_path, module_name):
@@ -244,15 +249,51 @@ def print_summary(summary, games, max_round, initial_stack, small_blind):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run repeated poker games between two player scripts.")
+    parser = argparse.ArgumentParser(description="Run repeated poker games between player scripts.")
     parser.add_argument("player_a")
-    parser.add_argument("player_b")
+    parser.add_argument("player_b", nargs="?")
+    parser.add_argument(
+        "--baseline-suite",
+        action="store_true",
+        help=(
+            "Only provide player_a. Runs player_a against randomplayer.py and "
+            "lucas_agents/condition_threshold_player.py for 300 games each."
+        ),
+    )
     parser.add_argument("--games", type=int, default=DEFAULT_GAMES)
     parser.add_argument("--max-round", type=int, default=DEFAULT_MAX_ROUND)
     parser.add_argument("--initial-stack", type=int, default=DEFAULT_STACK)
     parser.add_argument("--small-blind", type=int, default=DEFAULT_BLIND)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     args = parser.parse_args()
+
+    if args.baseline_suite:
+        if args.player_b is not None:
+            parser.error("--baseline-suite expects only player_a and no player_b.")
+        for index, opponent_path in enumerate(BASELINE_OPPONENTS):
+            if index:
+                print("")
+            print("Comparing %s vs %s" % (args.player_a, opponent_path))
+            summary = compare(
+                args.player_a,
+                opponent_path,
+                BASELINE_SUITE_GAMES,
+                args.max_round,
+                args.initial_stack,
+                args.small_blind,
+                args.workers,
+            )
+            print_summary(
+                summary,
+                BASELINE_SUITE_GAMES,
+                args.max_round,
+                args.initial_stack,
+                args.small_blind,
+            )
+        return
+
+    if args.player_b is None:
+        parser.error("player_b is required unless --baseline-suite is set.")
 
     summary = compare(
         args.player_a,

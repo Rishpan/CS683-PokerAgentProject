@@ -20,8 +20,9 @@ class LearnableAdversarialSearchPlayer(BasePokerPlayer):
       save_interval=50,
       random_seed=None,
   ):
+    super().__init__()
     self.training_enabled = training_enabled
-    self.use_search = False #use_search and not training_enabled
+    self.use_search = False if training_enabled else bool(use_search)
     self.save_interval = max(1, save_interval)
     self.cfr = TabularCFR(
         policy_path=policy_path,
@@ -30,7 +31,7 @@ class LearnableAdversarialSearchPlayer(BasePokerPlayer):
         random_seed=random_seed,
     )
     self.search = AdversarialSearch()
-
+    self._declare_action_impl = self.declare_action
   def declare_action(self, valid_actions, hole_card, round_state):
     legal_actions = tuple(action["action"] for action in valid_actions)
     info_state, features = build_abstraction(hole_card, round_state)
@@ -63,6 +64,11 @@ class LearnableAdversarialSearchPlayer(BasePokerPlayer):
 
   def receive_round_result_message(self, winners, hand_info, round_state):
     pass
+
+  def reset_match_state(self):
+    self.declare_action = self._declare_action_impl
+    if hasattr(self, "cfr"):
+      self.cfr.reset_round_state()
 
 
 def setup_ai():
